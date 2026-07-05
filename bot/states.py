@@ -8,6 +8,7 @@ class UploadFlow(StatesGroup):
 
     choosing_folder = State()
     choosing_channel = State()
+    confirming_channel_image = State()
     choosing_image_source = State()
     choosing_saved_image = State()
     waiting_photo = State()

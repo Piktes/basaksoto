@@ -253,26 +253,78 @@ async def cb_choose_folder(callback: CallbackQuery, state: FSMContext) -> None:
 
 # ============================================================ kanal seçimi
 
-@router.callback_query(UploadFlow.choosing_channel, F.data.startswith("channel:"))
-async def cb_choose_channel(callback: CallbackQuery, state: FSMContext) -> None:
-    channel = db.get_channel(int(callback.data.split(":", 1)[1]))
-    if channel is None:
-        await callback.answer("Kanal bulunamadı.", show_alert=True)
-        return
-    await state.update_data(channel_name=channel["display_name"])
-    await callback.answer()
+def _channel_image_key(channel_id: int) -> str:
+    return f"channel_image:{channel_id}"
 
+
+async def _ask_image_source(message: Message, state: FSMContext) -> None:
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📚 Kayıtlı görseller", callback_data="imgsrc:saved")],
         [InlineKeyboardButton(text="📤 Telefondan görsel gönder", callback_data="imgsrc:upload")],
         [cancel_button()],
     ])
     await state.set_state(UploadFlow.choosing_image_source)
-    await callback.message.answer(
-        f"📺 Kanal: <b>{esc(channel['display_name'])}</b> ✅\n\n"
-        "🖼 Videoda görünecek görseli nasıl seçmek istersiniz?",
-        reply_markup=keyboard,
+    await message.answer(
+        "🖼 Videoda görünecek görseli nasıl seçmek istersiniz?", reply_markup=keyboard
     )
+
+
+def _remember_channel_image(channel_id: int | None, image_path: str) -> None:
+    """Kanal için son kullanılan (kalıcı) görseli hatırlar."""
+    if channel_id:
+        db.set_setting(_channel_image_key(channel_id), image_path)
+
+
+@router.callback_query(UploadFlow.choosing_channel, F.data.startswith("channel:"))
+async def cb_choose_channel(callback: CallbackQuery, state: FSMContext) -> None:
+    channel = db.get_channel(int(callback.data.split(":", 1)[1]))
+    if channel is None:
+        await callback.answer("Kanal bulunamadı.", show_alert=True)
+        return
+    await state.update_data(channel_name=channel["display_name"], channel_id=channel["id"])
+    await callback.answer()
+
+    # Bu kanal için hatırlanan görsel varsa tek dokunuşla devam önerilir.
+    saved_path = db.get_setting(_channel_image_key(channel["id"]))
+    if saved_path and Path(saved_path).exists():
+        await state.set_state(UploadFlow.confirming_channel_image)
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Bu görselle devam", callback_data="chimg:keep")],
+            [InlineKeyboardButton(text="🔄 Farklı görsel seç", callback_data="chimg:change")],
+            [cancel_button()],
+        ])
+        try:
+            await callback.message.answer_photo(
+                FSInputFile(Path(saved_path)),
+                caption=(f"📺 Kanal: <b>{esc(channel['display_name'])}</b> ✅\n\n"
+                         "🖼 Bu kanalın kayıtlı görseli bu. Bununla devam edilsin mi?"),
+                reply_markup=keyboard,
+            )
+            return
+        except Exception:  # noqa: BLE001 — önizleme gönderilemezse normal akış
+            logger.exception("Kanal görseli önizlemesi gönderilemedi: %s", saved_path)
+
+    await callback.message.answer(f"📺 Kanal: <b>{esc(channel['display_name'])}</b> ✅")
+    await _ask_image_source(callback.message, state)
+
+
+@router.callback_query(UploadFlow.confirming_channel_image, F.data == "chimg:keep")
+async def cb_channel_image_keep(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    saved_path = db.get_setting(_channel_image_key(data["channel_id"]))
+    if not (saved_path and Path(saved_path).exists()):
+        await callback.answer("Görsel artık yok, yeniden seçin.", show_alert=True)
+        await _ask_image_source(callback.message, state)
+        return
+    await state.update_data(image_path=saved_path, image_is_temp=False)
+    await callback.answer("Kanal görseliyle devam ediliyor.")
+    await _ask_title(callback.message, state)
+
+
+@router.callback_query(UploadFlow.confirming_channel_image, F.data == "chimg:change")
+async def cb_channel_image_change(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    await _ask_image_source(callback.message, state)
 
 
 # ============================================================ görsel seçimi
@@ -315,6 +367,8 @@ async def cb_choose_saved_image(callback: CallbackQuery, state: FSMContext) -> N
         await callback.answer("Görsel bulunamadı.", show_alert=True)
         return
     await state.update_data(image_path=image["file_path"], image_is_temp=False)
+    data = await state.get_data()
+    _remember_channel_image(data.get("channel_id"), image["file_path"])
     await callback.answer(f"Seçildi: {image['display_name']}")
     await _ask_title(callback.message, state)
 
@@ -362,6 +416,7 @@ async def cb_save_image(callback: CallbackQuery, state: FSMContext) -> None:
         display_name = f"Telegram {datetime.now():%d.%m.%Y %H:%M}"
         db.add_image(target, display_name)
         await state.update_data(image_path=str(target), image_is_temp=False)
+        _remember_channel_image(data.get("channel_id"), str(target))
         try:
             temp_path.unlink()
         except OSError:
