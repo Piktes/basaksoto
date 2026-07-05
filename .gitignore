@@ -17,3 +17,6 @@ __pycache__/
 *.egg-info/
 .venv/
 venv/
+
+# Yanlislikla eklenen arsivler
+*.zip

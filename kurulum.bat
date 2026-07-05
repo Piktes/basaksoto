@@ -8,21 +8,37 @@ echo.
 
 cd /d "%~dp0"
 
-REM --- Python kontrolu
-where py >nul 2>nul
-if errorlevel 1 (
-    where python >nul 2>nul
+REM --- Python komutunu bul (py veya python)
+set "PYCMD="
+py --version >nul 2>nul && set "PYCMD=py"
+if not defined PYCMD python --version >nul 2>nul && set "PYCMD=python"
+
+if not defined PYCMD (
+    echo [HATA] Python bulunamadi. Simdi winget ile kuruluyor...
+    winget install --id Python.Python.3.12 -e --accept-source-agreements --accept-package-agreements
     if errorlevel 1 (
-        echo [HATA] Python bulunamadi!
-        echo Once https://www.python.org/downloads/ adresinden Python 3.11+ kurun.
-        echo Kurulumda "Add python.exe to PATH" kutusunu isaretlemeyi unutmayin.
+        echo.
+        echo winget ile kurulamadi. Elle kurun:
+        echo   https://www.python.org/downloads/  adresinden indirin,
+        echo   kurulumda "Add python.exe to PATH" kutusunu ISARETLEYIN.
         pause
         exit /b 1
     )
+    echo.
+    echo ============================================
+    echo  Python kuruldu! Bu pencereyi KAPATIP
+    echo  kurulum.bat dosyasini YENIDEN calistirin.
+    echo ============================================
+    pause
+    exit /b 0
 )
 
+echo Python bulundu: %PYCMD%
+%PYCMD% --version
+echo.
+
 echo [1/5] Python paketleri kuruluyor...
-py -m pip install -r requirements.txt --disable-pip-version-check
+%PYCMD% -m pip install -r requirements.txt --disable-pip-version-check
 if errorlevel 1 (
     echo [HATA] pip kurulumu basarisiz oldu.
     pause
@@ -31,7 +47,7 @@ if errorlevel 1 (
 
 echo.
 echo [2/5] Playwright Chromium tarayicisi indiriliyor...
-py -m playwright install chromium
+%PYCMD% -m playwright install chromium
 if errorlevel 1 (
     echo [HATA] Chromium indirilemedi.
     pause
@@ -44,7 +60,7 @@ where ffmpeg >nul 2>nul
 if errorlevel 1 (
     echo ffmpeg bulunamadi, winget ile kuruluyor...
     winget install --id Gyan.FFmpeg -e --accept-source-agreements --accept-package-agreements
-    echo NOT: ffmpeg PATH'e eklendi - bu pencereyi kapatip kurulumu YENIDEN calistirirsaniz dogrulanir.
+    echo NOT: ffmpeg PATH'e eklendi - botu baslatmadan once bu pencereyi kapatin.
 ) else (
     echo ffmpeg kurulu.
 )
