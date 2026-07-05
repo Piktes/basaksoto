@@ -84,6 +84,7 @@ TEXTS: dict[str, list[str]] = {
     "create": ["Oluştur", "Create"],
     "checks_done": ["kontroller tamamlandı", "checks complete"],
     "verify_identity": ["Kimliğinizi doğrulayın", "Verify it's you", "Verify your identity"],
+    "publish_anyway": ["Yine de yayınla", "Publish anyway"],
     "upload_done": ["yükleme tamamlandı", "upload complete", "işleniyor", "processing"],
     "uploading": ["yükleniyor", "uploading"],
 }
@@ -473,7 +474,21 @@ class StudioUploader:
             return None
 
     async def _confirm_published(self, page: Page, fallback_url: str | None) -> str:
-        """Yayınlandı diyaloğundan video linkini alır."""
+        """Yayınlandı diyaloğundan video linkini alır.
+
+        Telif kontrolleri sürerken yayınlanırsa Studio "İçeriğinizi kontrol
+        etmeye devam ediyoruz" onayı çıkarır — "Yine de yayınla" ile geçilir
+        (kontroller yayından sonra da devam eder).
+        """
+        for text in TEXTS["publish_anyway"]:
+            button = page.get_by_role("button", name=text)
+            try:
+                await button.first.click(timeout=5_000)
+                logger.info("Kontroller sürüyor uyarısı geçildi ('%s').", text)
+                await _human_pause()
+                break
+            except PlaywrightTimeoutError:
+                continue
         try:
             await page.locator(SELECTORS["share_dialog"]).first.wait_for(state="visible", timeout=60_000)
             share = page.locator(SELECTORS["share_url"]).first
