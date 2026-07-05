@@ -41,7 +41,7 @@ async def create_video(image_path: Path, audio_path: Path, output_path: Path) ->
         "-c:v", "libx264", "-tune", "stillimage", "-preset", "veryfast",
         "-r", "6",
         "-pix_fmt", "yuv420p",
-        "-c:a", "aac", "-b:a", "192k",
+        "-c:a", "aac", "-b:a", "256k",
         "-movflags", "+faststart",
         "-shortest",
         str(output_path),
