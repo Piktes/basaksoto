@@ -30,15 +30,19 @@ async def create_video(image_path: Path, audio_path: Path, output_path: Path) ->
     Süre ``-shortest`` ile ses dosyasının süresine eşitlenir.
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    # Görüntü sabit olduğu için 6 fps + veryfast yeterli: kalite aynı kalır,
+    # kodlama 30 fps/medium'a göre ~10x hızlanır. YouTube düşük fps'i kabul eder.
     args = [
         "ffmpeg", "-y",
-        "-loop", "1", "-i", str(image_path),
+        "-loop", "1", "-framerate", "6", "-i", str(image_path),
         "-i", str(audio_path),
         "-vf", "scale=1920:1080:force_original_aspect_ratio=decrease,"
                "pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black",
-        "-c:v", "libx264", "-tune", "stillimage", "-preset", "medium",
+        "-c:v", "libx264", "-tune", "stillimage", "-preset", "veryfast",
+        "-r", "6",
         "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-b:a", "192k",
+        "-movflags", "+faststart",
         "-shortest",
         str(output_path),
     ]
