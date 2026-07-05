@@ -343,7 +343,10 @@ class StudioUploader:
         else:
             # Metin bulunamadıysa menüdeki ilk öğe (Upload videos) denenir.
             await page.locator(SELECTORS["upload_menu_item"]).first.click(timeout=10_000)
-        await page.locator(SELECTORS["upload_dialog"]).first.wait_for(state="visible", timeout=30_000)
+        # ytcp-uploads-dialog ekranda görünse bile Playwright'a "hidden" raporlanabiliyor;
+        # dosya gizli input'a verildiği için DOM'a eklenmiş olmaları yeterli.
+        await page.locator(SELECTORS["upload_dialog"]).first.wait_for(state="attached", timeout=30_000)
+        await page.locator(SELECTORS["file_input"]).first.wait_for(state="attached", timeout=30_000)
 
     async def _fill_textbox(self, page: Page, selector: str, value: str, field_name: str) -> None:
         """Contenteditable alanı temizleyip yazar; sonra içeriği doğrular."""
