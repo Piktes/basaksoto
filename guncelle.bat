@@ -7,14 +7,21 @@ echo   Basaksoto Bot - Guncelleme
 echo ============================================
 echo.
 
-REM --- git kontrolu
+REM --- git kontrolu (PATH'te yoksa standart kurulum yollarini dene)
+set "GIT=git"
 git --version >nul 2>nul
 if errorlevel 1 (
-    echo [HATA] git bulunamadi. Once sunu calistirin:
-    echo    winget install --id Git.Git -e
-    echo Sonra bu pencereyi kapatip guncelle.bat'i yeniden calistirin.
-    pause
-    exit /b 1
+    if exist "%ProgramFiles%\Git\cmd\git.exe" (
+        set "GIT=%ProgramFiles%\Git\cmd\git.exe"
+    ) else if exist "%LocalAppData%\Programs\Git\cmd\git.exe" (
+        set "GIT=%LocalAppData%\Programs\Git\cmd\git.exe"
+    ) else (
+        echo [HATA] git bulunamadi. Once sunu calistirin:
+        echo    winget install --id Git.Git -e
+        echo Sonra ACIK TUM PENCERELERI KAPATIP guncelle.bat'i yeniden calistirin.
+        pause
+        exit /b 1
+    )
 )
 
 REM --- klasor git'e bagli degilse (ZIP kurulumu) bir kereligine bagla
