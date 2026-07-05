@@ -90,7 +90,8 @@ def sync_folders(drive_folders: list[dict[str, Any]]) -> list[sqlite3.Row]:
         drive_folders: her biri ``{"id", "name", "createdTime"}`` içeren sözlükler.
 
     Returns:
-        Eklenenler dahil, durumu 'yeni' olan tüm klasör satırları.
+        Eklenenler dahil, durumu 'yeni' veya 'hata' olan tüm klasör satırları
+        (hata alanlar yeniden denenebilsin diye listede kalır).
     """
     with closing(_connect()) as conn, conn:
         for f in drive_folders:
@@ -100,7 +101,8 @@ def sync_folders(drive_folders: list[dict[str, Any]]) -> list[sqlite3.Row]:
                 (f["id"], f["name"], f.get("createdTime"), _now()),
             )
         rows = conn.execute(
-            "SELECT * FROM folders WHERE status = ? ORDER BY created_time DESC", (STATUS_NEW,)
+            "SELECT * FROM folders WHERE status IN (?, ?) ORDER BY created_time DESC",
+            (STATUS_NEW, STATUS_ERROR),
         ).fetchall()
     return rows
 

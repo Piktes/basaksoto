@@ -145,7 +145,8 @@ async def cmd_baslat(message: Message, state: FSMContext) -> None:
 
     rows = [
         [InlineKeyboardButton(
-            text=f"📁 {f['folder_name']} — {fmt_date(f['created_time'])}",
+            text=(f"{'⚠️' if f['status'] == db.STATUS_ERROR else '📁'} "
+                  f"{f['folder_name']} — {fmt_date(f['created_time'])}"),
             callback_data=f"folder:{f['folder_id']}",
         )]
         for f in new_folders
