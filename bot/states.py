@@ -22,6 +22,7 @@ class UploadFlow(StatesGroup):
 
 
 class ChannelFlow(StatesGroup):
-    """/kanallar → kanal ekleme."""
+    """/kanallar → kanal ekleme / başlık öneki."""
 
     waiting_name = State()
+    waiting_prefix = State()

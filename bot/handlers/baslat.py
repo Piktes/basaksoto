@@ -431,12 +431,14 @@ async def cb_save_image(callback: CallbackQuery, state: FSMContext) -> None:
 
 async def _ask_title(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
-    suggested = data["folder_name"][:TITLE_MAX]
+    prefix = db.get_setting(f"title_prefix:{data['channel_id']}") if data.get("channel_id") else None
+    full = f"{prefix} - {data['folder_name']}" if prefix else data["folder_name"]
+    suggested = full[:TITLE_MAX]
     await state.update_data(title=suggested)
     await state.set_state(UploadFlow.confirming_title)
     note = ""
-    if len(data["folder_name"]) > TITLE_MAX:
-        note = f"\n⚠️ Klasör adı {TITLE_MAX} karakteri aştığı için kırpıldı."
+    if len(full) > TITLE_MAX:
+        note = f"\n⚠️ Başlık {TITLE_MAX} karakteri aştığı için kırpıldı."
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Onayla", callback_data="title:ok"),
          InlineKeyboardButton(text="✏️ Düzenle", callback_data="title:edit")],
@@ -453,9 +455,13 @@ async def cb_title_ok(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(UploadFlow.confirming_title, F.data == "title:edit")
 async def cb_title_edit(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
     await state.set_state(UploadFlow.editing_title)
     await callback.message.answer(
-        f"Yeni başlığı yazın (en fazla {TITLE_MAX} karakter):", reply_markup=cancel_keyboard()
+        "Mevcut başlık (dokununca kopyalanır — yapıştırıp üzerinde düzeltin):\n"
+        f"<code>{esc(data.get('title', ''))}</code>\n\n"
+        f"Yeni başlığı tek mesaj olarak gönderin (en fazla {TITLE_MAX} karakter):",
+        reply_markup=cancel_keyboard(),
     )
     await callback.answer()
 
@@ -530,9 +536,19 @@ async def cb_desc_ok(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(UploadFlow.confirming_description, F.data == "desc:edit")
 async def cb_desc_edit(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    current = data.get("description", "")
     await state.set_state(UploadFlow.editing_description)
+    if current:
+        # Telegram mesaj sınırı 4096; kopyalanabilir blok için pay bırakılır.
+        chunk = current[:3900]
+        more = "\n\n<i>(devamı kırpıldı)</i>" if len(current) > 3900 else ""
+        await callback.message.answer(
+            "Mevcut açıklama (dokununca kopyalanır — yapıştırıp üzerinde düzeltin):"
+            f"\n<code>{esc(chunk)}</code>{more}"
+        )
     await callback.message.answer(
-        f"Yeni açıklamayı tek mesaj olarak yazın (en fazla {DESCRIPTION_MAX} karakter):",
+        f"Yeni açıklamayı tek mesaj olarak gönderin (en fazla {DESCRIPTION_MAX} karakter):",
         reply_markup=cancel_keyboard(),
     )
     await callback.answer()
