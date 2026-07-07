@@ -469,7 +469,11 @@ class StudioUploader:
             raw = await item.locator(SELECTORS["switcher_item_name"]).first.inner_text()
             names.append(raw.strip())
             if _norm(raw) == wanted:
-                await item.click()
+                await item.locator("tp-yt-paper-icon-item, #channel-title").first.click()
+                try:
+                    await page.wait_for_url(lambda url: "channel_switcher" not in url, timeout=20_000)
+                except PlaywrightTimeoutError:
+                    pass
                 await page.wait_for_load_state("domcontentloaded")
                 await _human_pause(1.0, 2.0)
                 await page.goto(STUDIO_URL, wait_until="domcontentloaded")
