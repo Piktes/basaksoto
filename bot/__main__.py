@@ -32,6 +32,8 @@ _BOT_COMMANDS = [
     BotCommand(command="istatistik", description="Yükleme raporları"),
     BotCommand(command="gorseller", description="Görsel kütüphanesi"),
     BotCommand(command="kanallar", description="Kanal adlarını yönet"),
+    BotCommand(command="durdur", description="Botu geçici olarak durdur"),
+    BotCommand(command="restart", description="Botu aktifleştir ve yeniden başlat"),
     BotCommand(command="yardim", description="Yardım"),
 ]
 

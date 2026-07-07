@@ -109,6 +109,12 @@ def _cleanup_job_files(job: UploadJob) -> None:
 
 @router.message(Command("baslat"))
 async def cmd_baslat(message: Message, state: FSMContext) -> None:
+    if db.get_setting("bot_status") == "paused":
+        await message.answer(
+            "⚠️ **Bot şu anda durdurulmuş durumda.**\n"
+            "Yeni yükleme başlatmak için önce `/restart` yazarak bota start verin."
+        )
+        return
     if UPLOAD_LOCK.locked():
         await message.answer(
             "⏳ Şu anda bir yükleme devam ediyor. Bitince tekrar /baslat yazabilirsiniz."
@@ -131,10 +137,11 @@ async def cmd_baslat(message: Message, state: FSMContext) -> None:
 
     new_folders = db.sync_folders(folders)
     all_channels = db.get_all_channel_names()
+    all_uploads = db.get_all_folder_uploads()
     rows = []
     
     for f in new_folders:
-        uploaded = db.get_uploaded_channels_for_folder(f['folder_id'])
+        uploaded = all_uploads.get(f['folder_id'], [])
         if all_channels and set(uploaded) >= set(all_channels):
             continue
             

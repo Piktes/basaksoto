@@ -19,6 +19,8 @@ _HELP_TEXT = (
     "📷 Bota fotoğraf gönder → kütüphaneye veya thumbnail olarak kaydet\n"
     "/kanallar — YouTube kanal adlarını yönet\n"
     "/guncelle — botu en son sürüme güncelle ve yeniden başlat\n"
+    "/durdur — botu geçici olarak durdurur (yeni yüklemeleri engeller)\n"
+    "/restart — botu aktif hale getirir ve yeniden başlatır\n"
     "/yardim — bu mesaj"
 )
 
@@ -31,3 +33,22 @@ async def cmd_start(message: Message) -> None:
 @router.message(Command("yardim", "help"))
 async def cmd_help(message: Message) -> None:
     await message.answer(_HELP_TEXT)
+
+
+@router.message(Command("durdur"))
+async def cmd_durdur(message: Message) -> None:
+    from ..services import db
+    db.set_setting("bot_status", "paused")
+    await message.answer(
+        "⏸️ **Bot geçici olarak durduruldu.**\n"
+        "Yeni yüklemeler engellenmiştir. Botu tekrar aktifleştirmek ve yeniden başlatmak için /restart komutunu kullanabilirsiniz."
+    )
+
+
+@router.message(Command("restart"))
+async def cmd_restart(message: Message) -> None:
+    import sys
+    from ..services import db
+    db.set_setting("bot_status", "running")
+    await message.answer("🔄 **Bot aktifleştiriliyor ve yeniden başlatılıyor...**\nLütfen bekleyin...")
+    sys.exit(1)

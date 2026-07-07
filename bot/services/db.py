@@ -310,3 +310,14 @@ def get_all_channel_names() -> list[str]:
     with closing(_connect()) as conn:
         rows = conn.execute("SELECT display_name FROM channels").fetchall()
         return [r["display_name"] for r in rows]
+
+
+def get_all_folder_uploads() -> dict[str, list[str]]:
+    with closing(_connect()) as conn:
+        rows = conn.execute("SELECT folder_id, channel_name FROM uploads").fetchall()
+        mapping: dict[str, list[str]] = {}
+        for r in rows:
+            fid = r["folder_id"]
+            cname = r["channel_name"]
+            mapping.setdefault(fid, []).append(cname)
+        return mapping
