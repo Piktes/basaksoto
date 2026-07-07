@@ -142,6 +142,7 @@ class StudioUploader:
         tags: list[str] | None = None,
         on_progress: ProgressCallback | None = None,
         on_screenshot: ScreenshotCallback | None = None,
+        on_channel_confirm: Callable[[bytes], Any] | None = None,
     ) -> str:
         """Videoyu seçilen kanala yükler, Herkese Açık yayınlar; video linkini döndürür.
 
@@ -185,6 +186,15 @@ class StudioUploader:
                 step = "kanal değiştirme"
                 await self._ensure_channel(context, page, channel_name)
                 await self._handle_identity_check(page)
+
+                if on_channel_confirm:
+                    logger.info("Kanal onayı bekleniyor...")
+                    approved = await on_channel_confirm(await page.screenshot(full_page=False))
+                    if not approved:
+                        raise StudioUploadError(
+                            "kanal doğrulaması",
+                            "Kullanıcı kanal adını hatalı buldu ve yüklemeyi durdurdu."
+                        )
 
                 step = "yükleme diyaloğunu açma"
                 await self._open_upload_dialog(page)

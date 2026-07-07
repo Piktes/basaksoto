@@ -77,6 +77,9 @@ class UploadJob:
 # Başarısız işler: folder_id → job ("🔁 Tekrar dene" için)
 RETRY_JOBS: dict[str, UploadJob] = {}
 
+# Kanal onay bekleyenler: folder_id -> (asyncio.Event, Callable[[bool], None])
+ACTIVE_CONFIRMS: dict[str, tuple[asyncio.Event, Any]] = {}
+
 
 # ================================================================ yardımcılar
 
@@ -285,6 +288,34 @@ async def cb_choose_folder(callback: CallbackQuery, state: FSMContext) -> None:
 async def cb_already_uploaded(callback: CallbackQuery) -> None:
     channel_name = callback.data.split(":", 1)[1]
     await callback.answer(f"⚠️ Bu klasör zaten '{channel_name}' kanalına yüklendi!", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("upload_confirm:"))
+async def cb_upload_confirm(callback: CallbackQuery) -> None:
+    parts = callback.data.split(":")
+    decision = parts[1]  # "yes" or "no"
+    folder_id = parts[2]
+    
+    confirm_data = ACTIVE_CONFIRMS.get(folder_id)
+    if confirm_data is None:
+        await callback.answer("Bu onaylama süresi geçmiş veya iptal edilmiş.", show_alert=True)
+        return
+        
+    await callback.answer()
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:  # noqa: BLE001
+        pass
+        
+    event, set_approval = confirm_data
+    if decision == "yes":
+        await callback.message.reply("✅ Onaylandı, yükleme işlemine devam ediliyor...")
+        set_approval(True)
+    else:
+        await callback.message.reply("❌ Yükleme durduruldu. Kanalı değiştirip tekrar /baslat yapabilirsiniz.")
+        set_approval(False)
+        
+    event.set()
 
 
 # ============================================================ kanal seçimi
@@ -843,6 +874,39 @@ async def _run_pipeline(bot: Bot, job: UploadJob) -> None:
                 except Exception:  # noqa: BLE001
                     logger.exception("Ekran görüntüsü gönderilemedi.")
 
+            confirm_event = asyncio.Event()
+            user_approved = False
+
+            async def on_channel_confirm(screenshot_bytes: bytes) -> bool:
+                nonlocal user_approved
+                keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                    [
+                        InlineKeyboardButton(text="✅ Devam Et", callback_data=f"upload_confirm:yes:{job.folder_id}"),
+                        InlineKeyboardButton(text="❌ Durdur", callback_data=f"upload_confirm:no:{job.folder_id}"),
+                    ]
+                ])
+                
+                ACTIVE_CONFIRMS[job.folder_id] = (confirm_event, set_approved_flag)
+                
+                await bot.send_photo(
+                    chat_id=job.chat_id,
+                    photo=BufferedInputFile(screenshot_bytes, filename="kanal_kontrol.png"),
+                    caption=(
+                        f"👀 <b>Kanal Doğrulama Kontrolü</b>\n\n"
+                        f"📂 Klasör: <b>{esc(job.folder_name)}</b>\n"
+                        f"📺 Hedef Kanal: <b>{esc(job.channel_name)}</b>\n\n"
+                        f"Lütfen yukarıdaki ekran görüntüsünü kontrol edin. Doğru kanal açık mı?\n"
+                        f"Yükleme başlasın mı?"
+                    ),
+                    reply_markup=keyboard
+                )
+                await confirm_event.wait()
+                return user_approved
+
+            def set_approved_flag(approved: bool) -> None:
+                nonlocal user_approved
+                user_approved = approved
+
             uploader = StudioUploader(cfg)
             video_url = await asyncio.wait_for(
                 uploader.upload(
@@ -855,8 +919,9 @@ async def _run_pipeline(bot: Bot, job: UploadJob) -> None:
                     tags=job.tags,
                     on_progress=on_progress,
                     on_screenshot=on_screenshot,
+                    on_channel_confirm=on_channel_confirm,
                 ),
-                timeout=(cfg.upload_timeout_minutes + 5) * 60,
+                timeout=(cfg.upload_timeout_minutes + 10) * 60,
             )
 
             # 4) Başarı: kayıt + temizlik
