@@ -143,8 +143,6 @@ async def cmd_baslat(message: Message, state: FSMContext) -> None:
     
     for f in new_folders:
         uploaded = all_uploads.get(f['folder_id'], [])
-        if all_channels and set(uploaded) >= set(all_channels):
-            continue
             
         status_parts = []
         for chan in all_channels:
