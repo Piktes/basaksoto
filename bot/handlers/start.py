@@ -18,6 +18,7 @@ _HELP_TEXT = (
     "/gorseller — kayıtlı görsel kütüphanesini yönet\n"
     "📷 Bota fotoğraf gönder → kütüphaneye veya thumbnail olarak kaydet\n"
     "/kanallar — YouTube kanal adlarını yönet\n"
+    "/guncelle — botu en son sürüme güncelle ve yeniden başlat\n"
     "/yardim — bu mesaj"
 )
 
