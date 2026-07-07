@@ -99,6 +99,12 @@ async def run_bot(config: Config) -> None:
     await bot.set_my_commands(_BOT_COMMANDS)
     me = await bot.get_me()
     logger.info("Bot başladı: @%s (izinli kullanıcılar: %s)", me.username, config.allowed_user_ids)
+    
+    for user_id in config.allowed_user_ids:
+        try:
+            await bot.send_message(user_id, "🤖 **Bot aktif ve hazır!**")
+        except Exception:
+            pass
     try:
         await dispatcher.start_polling(bot)
     finally:
