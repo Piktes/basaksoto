@@ -36,6 +36,9 @@ UPLOAD_LOCK = asyncio.Lock()
 STUDIO_URL = "https://studio.youtube.com/"
 CHANNEL_SWITCHER_URL = "https://www.youtube.com/channel_switcher"
 
+# Gelen doğrulama kodlarını asenkron beklemek için Future haritası (chat_id -> Future)
+VERIFICATION_FUTURES: dict[int, asyncio.Future[str]] = {}
+
 # Headless Chromium'un user-agent'ı "HeadlessChrome" içerir; Studio bunu
 # "desteklenmeyen tarayıcı" sayar. Headless modda normal Chrome UA kullanılır.
 HEADLESS_USER_AGENT = (
@@ -134,6 +137,7 @@ class StudioUploader:
         title: str,
         description: str,
         channel_name: str,
+        chat_id: int,
         thumbnail_path: Path | None = None,
         tags: list[str] | None = None,
         on_progress: ProgressCallback | None = None,
@@ -146,6 +150,7 @@ class StudioUploader:
             StudioUploadError: Herhangi bir adım başarısız olursa (ekran
                 görüntüsüyle birlikte).
         """
+        self._chat_id = chat_id
         self._on_progress = on_progress
         self._on_screenshot = on_screenshot
         step = "tarayıcı başlatma"
@@ -249,7 +254,7 @@ class StudioUploader:
 
     async def _handle_identity_check(self, page: Page) -> bool:
         """Google'ın 'Kimliğinizi doğrulayın' diyaloğu çıktığında bota bildirim
-        gönderip telefon onay ekranını bekler.
+        gönderip kurtarma e-postası seçeneğini tetikler ve kullanıcının gireceği kodu bekler.
         """
         import time
         is_identity_dialog = False
@@ -280,7 +285,6 @@ class StudioUploader:
                 continue
 
         if not next_button:
-            # Fallback ytcp button selector
             next_button = page.locator("ytcp-button[id=confirm-button], paper-button[id=confirm-button]").first
 
         try:
@@ -289,35 +293,111 @@ class StudioUploader:
         except Exception as exc:
             logger.warning("Sonraki butonuna tıklanamadı: %s", exc)
 
-        # Onay ekranının yüklenmesi için bekle
+        # Onay seçenekleri ekranının yüklenmesi için bekle
         await asyncio.sleep(4)
 
+        # 1. "Başka bir yöntem dene" (Try another way) linkini/butonunu bul ve tıkla
+        try:
+            try_another = None
+            for text in ["Başka bir yöntem dene", "Try another way", "Try another way to sign in"]:
+                btn = page.get_by_text(text, exact=False).first
+                if await btn.is_visible(timeout=2000):
+                    try_another = btn
+                    break
+            
+            if try_another:
+                await try_another.click()
+                logger.info("Başka bir yöntem dene tıklandı.")
+                await asyncio.sleep(3)
+        except Exception as exc:
+            logger.warning("Başka bir yöntem dene tıklanamadı: %s", exc)
+
+        # 2. Kurtarma e-postası (Recovery email) seçeneğini bul ve tıkla
+        try:
+            email_option = None
+            texts_to_check = [
+                "kurtarma e-postanıza", "kurtarma", "recovery", "kurtarma e-posta", 
+                "recovery email", "kurtarma e-postası", "kod gönder"
+            ]
+            for opt_text in texts_to_check:
+                btn = page.get_by_text(opt_text, exact=False).first
+                if await btn.is_visible(timeout=1500):
+                    email_option = btn
+                    break
+            
+            if not email_option:
+                items = page.locator("li, div[role=button]").all()
+                for item in items:
+                    txt = await item.inner_text()
+                    if "@" in txt or "kurtarma" in txt.lower() or "recovery" in txt.lower():
+                        email_option = item
+                        break
+
+            if email_option:
+                await email_option.click()
+                logger.info("Kurtarma e-postası seçeneği tıklandı.")
+                await asyncio.sleep(4)
+        except Exception as exc:
+            logger.warning("Kurtarma e-postası seçilemedi: %s", exc)
+
+        # 3. Ekran görüntüsü al ve kullanıcıya göndererek kodu bota yazmasını iste
         screenshot = await self._safe_screenshot(page)
         if screenshot and self._on_screenshot:
             await self._on_screenshot(
                 screenshot,
-                "⚠️ **Google Kimlik Doğrulaması gerekiyor!**\n\n"
-                "Google güvenlik uyarısı çıkardı. Lütfen telefonunuza gelen bildirimi onaylayın "
-                "(ekranda numara varsa telefonunuzdan aynı numarayı seçin).\n"
-                "Onayladıktan sonra bot otomatik olarak devam edecektir. (Zaman aşımı: 90 saniye)"
+                "📬 **Google kurtarma e-postanıza doğrulama kodu gönderdi!**\n\n"
+                "Lütfen kurtarma e-postanıza (Gmail) gelen **6 haneli doğrulama kodunu** "
+                "bota doğrudan mesaj olarak gönderin.\n"
+                "Zaman aşımı süresi: 3 dakika."
             )
 
-        start_time = time.time()
-        approved = False
-        while time.time() - start_time < 90:
-            if "studio.youtube.com" in page.url and "accounts.google.com" not in page.url:
-                approved = True
-                break
-            await asyncio.sleep(3)
-
-        if approved:
-            logger.info("Doğrulama telefondan onaylandı, devam ediliyor!")
+        # 4. Kullanıcının kodu bota girmesini bekle
+        future = asyncio.Future()
+        VERIFICATION_FUTURES[self._chat_id] = future
+        
+        try:
+            # Wait up to 3 minutes for code entry
+            code = await asyncio.wait_for(future, timeout=180.0)
+            logger.info("Kullanıcıdan gelen kod: %s", code)
+        except asyncio.TimeoutError:
+            logger.warning("Doğrulama kodu zaman aşımı.")
             if self._on_progress:
-                await self._on_progress("✅ Kimlik doğrulaması telefondan onaylandı! Yüklemeye devam ediliyor...")
+                await self._on_progress("❌ Doğrulama kodu zamanında girilmedi. Yükleme iptal ediliyor.")
+            return False
+        finally:
+            VERIFICATION_FUTURES.pop(self._chat_id, None)
+
+        # 5. Kodu tarayıcıya gir
+        try:
+            code_input = page.locator("input[type=tel], input[id=code], input[name=code], input[type=text]").first
+            await code_input.fill(code)
+            await _human_pause(0.5, 1.0)
+            
+            next_btn = None
+            for txt in ["Sonraki", "Next"]:
+                btn = page.get_by_role("button", name=txt).first
+                if await btn.is_visible(timeout=2000):
+                    next_btn = btn
+                    break
+            if not next_btn:
+                next_btn = page.locator("button[type=submit], #next, #submit").first
+                
+            await next_btn.click()
+            logger.info("Doğrulama kodu gönderildi, yönlendirme bekleniyor...")
+            await asyncio.sleep(5)
+        except Exception as exc:
+            logger.warning("Kod girilirken hata: %s", exc)
+            return False
+
+        # Son kontrol: YouTube Studio'ya geri yönlendirildik mi?
+        if "studio.youtube.com" in page.url and "accounts.google.com" not in page.url:
+            logger.info("Doğrulama başarılı, devam ediliyor!")
+            if self._on_progress:
+                await self._on_progress("✅ Google kimlik doğrulaması başarıyla onaylandı! Yükleme devam ediyor...")
             await asyncio.sleep(3)
             return True
         else:
-            logger.warning("Kimlik doğrulaması onaylanmadı (zaman aşımı).")
+            logger.warning("Doğrulama başarısız oldu (Studio'ya dönülemedi).")
             return False
 
     async def _dismiss_browser_warning(self, page: Page) -> None:

@@ -34,6 +34,7 @@ from ..services.docx_reader import DocxError, extract_text
 from ..services.drive import DriveError
 from ..services.studio_uploader import (
     UPLOAD_LOCK,
+    VERIFICATION_FUTURES,
     SessionExpiredError,
     StudioUploader,
     StudioUploadError,
@@ -851,6 +852,7 @@ async def _run_pipeline(bot: Bot, job: UploadJob) -> None:
                     title=job.title,
                     description=job.description,
                     channel_name=job.channel_name,
+                    chat_id=job.chat_id,
                     thumbnail_path=cfg.default_thumbnail,
                     tags=job.tags,
                     on_progress=on_progress,
@@ -914,3 +916,18 @@ async def _handle_failure(bot: Bot, job: UploadJob, detail: str, *, header: str)
         f"{header}\n\n<b>Klasör:</b> {esc(job.folder_name)}\n<b>Ayrıntı:</b> {esc(detail)}\n{kept}",
         reply_markup=keyboard,
     )
+
+
+# ============================================================ doğrulama kodu dinleyicisi
+
+def is_waiting_verification(message: Message) -> bool:
+    return message.chat.id in VERIFICATION_FUTURES
+
+
+@router.message(is_waiting_verification, F.text)
+async def cb_verification_code_received(message: Message) -> None:
+    code = message.text.strip()
+    fut = VERIFICATION_FUTURES.get(message.chat.id)
+    if fut and not fut.done():
+        fut.set_result(code)
+        await message.answer("🔑 Kod alındı, Google doğrulama sayfasına giriliyor...")
