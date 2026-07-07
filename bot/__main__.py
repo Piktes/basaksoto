@@ -128,7 +128,7 @@ def kill_other_instances() -> None:
                     cmdline_file = pid_dir / "cmdline"
                     if cmdline_file.exists():
                         cmdline = cmdline_file.read_text().replace("\x00", " ")
-                        if "-m bot" in cmdline or "python -m bot" in cmdline:
+                        if ("-m bot" in cmdline or "python -m bot" in cmdline) and "--login-setup" not in cmdline:
                             # logging might not be fully configured yet, use print and fallback logger
                             print(f"Diğer bot süreci bulundu (PID {pid}), sonlandırılıyor...")
                             os.kill(pid, signal.SIGKILL)
