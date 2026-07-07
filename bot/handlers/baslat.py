@@ -148,14 +148,16 @@ async def cmd_baslat(message: Message, state: FSMContext) -> None:
             
         status_parts = []
         for chan in all_channels:
-            short_name = chan[:12] + ".." if len(chan) > 12 else chan
+            short_name = chan.split(" ")[0]
+            if len(short_name) > 8:
+                short_name = short_name[:7] + "."
             icon = "✅" if chan in uploaded else "❌"
             status_parts.append(f"{short_name} {icon}")
         status_str = " | ".join(status_parts) if status_parts else ""
         
         icon = '⚠️' if f['status'] == db.STATUS_ERROR else '📁'
         if status_str:
-            text = f"{icon} {f['folder_name']}\n└ {status_str}"
+            text = f"{icon} {f['folder_name']} [{status_str}]"
         else:
             text = f"{icon} {f['folder_name']}"
             
