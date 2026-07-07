@@ -462,6 +462,9 @@ class StudioUploader:
                 await self._safe_screenshot(page),
             ) from exc
 
+        # JS click handler'larının yüklenip elementlere bağlanması için kısa süre bekle
+        await _human_pause(1.5, 2.5)
+
         count = await items.count()
         names: list[str] = []
         for i in range(count):
@@ -469,11 +472,17 @@ class StudioUploader:
             raw = await item.locator(SELECTORS["switcher_item_name"]).first.inner_text()
             names.append(raw.strip())
             if _norm(raw) == wanted:
-                await item.locator("tp-yt-paper-icon-item, #channel-title").first.click()
+                clickable = item.locator("tp-yt-paper-icon-item, #channel-title").first
+                await clickable.click()
+                
+                # Kanal geçiş yönlendirmesinin başladığını doğrula (yönlenmezse tekrar tıkla)
                 try:
-                    await page.wait_for_url(lambda url: "channel_switcher" not in url, timeout=20_000)
+                    await page.wait_for_url(lambda url: "channel_switcher" not in url, timeout=5_000)
                 except PlaywrightTimeoutError:
-                    pass
+                    logger.warning("Kanal geçişi tetiklenmedi, tekrar tıklanıyor...")
+                    await clickable.click()
+                    await page.wait_for_url(lambda url: "channel_switcher" not in url, timeout=15_000)
+
                 await page.wait_for_load_state("domcontentloaded")
                 await _human_pause(1.0, 2.0)
                 await page.goto(STUDIO_URL, wait_until="domcontentloaded")
