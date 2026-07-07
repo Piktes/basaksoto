@@ -157,7 +157,7 @@ async def cmd_baslat(message: Message, state: FSMContext) -> None:
         
         icon = '⚠️' if f['status'] == db.STATUS_ERROR else '📁'
         if status_str:
-            text = f"{icon} {f['folder_name']} [{status_str}]"
+            text = f"[{status_str}] {icon} {f['folder_name']}"
         else:
             text = f"{icon} {f['folder_name']}"
             
