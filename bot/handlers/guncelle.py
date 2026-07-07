@@ -34,13 +34,12 @@ async def cmd_guncelle(message: Message) -> None:
 
         out_msg = stdout.decode(errors="replace").strip()
         if "Already up to date" in out_msg or "Zaten güncel" in out_msg:
-            await message.answer("✅ Bot zaten en güncel sürümde.")
-            return
-
-        await message.answer(
-            f"🔄 Güncelleme tamamlandı:\n<code>{out_msg}</code>\n\n"
-            "Bot şimdi yeniden başlatılıyor..."
-        )
+            await message.answer("✅ Bot zaten en güncel sürümde. Yine de yeniden başlatılıyor...")
+        else:
+            await message.answer(
+                f"🔄 Güncelleme tamamlandı:\n<code>{out_msg}</code>\n\n"
+                "Bot şimdi yeniden başlatılıyor..."
+            )
         
         # systemd servisi (Restart=always) botu otomatik ayağa kaldıracaktır
         sys.exit(1)
