@@ -153,6 +153,17 @@ class StudioUploader:
         self._chat_id = chat_id
         self._on_progress = on_progress
         self._on_screenshot = on_screenshot
+        
+        # Chromium çökme sonrası kilit dosyalarını temizle (SingletonLock vb.)
+        for lock_name in ["SingletonLock", "SingletonCookie", "SingletonSocket"]:
+            lock_file = self._cfg.browser_profile_dir / lock_name
+            if lock_file.exists() or lock_file.is_symlink():
+                try:
+                    lock_file.unlink()
+                    logger.info("Eski kilit dosyası temizlendi: %s", lock_name)
+                except Exception as exc:
+                    logger.warning("Kilit dosyası %s silinemedi: %s", lock_name, exc)
+                    
         step = "tarayıcı başlatma"
         async with async_playwright() as pw:
             launch_kwargs: dict = {
@@ -708,6 +719,14 @@ async def login_setup(config: Config | None = None) -> None:
     print("Açılan Chrome penceresinde Google hesabınıza giriş yapın ve")
     print("studio.youtube.com'un açıldığını görün. İki kanal arasında geçişi de deneyin.")
     print("Bittiğinde bu terminale dönüp Enter'a basın.\n")
+    for lock_name in ["SingletonLock", "SingletonCookie", "SingletonSocket"]:
+        lock_file = cfg.browser_profile_dir / lock_name
+        if lock_file.exists() or lock_file.is_symlink():
+            try:
+                lock_file.unlink()
+            except Exception:
+                pass
+                
     async with async_playwright() as pw:
         context = await pw.chromium.launch_persistent_context(
             user_data_dir=str(cfg.browser_profile_dir),
