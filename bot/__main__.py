@@ -111,7 +111,36 @@ async def run_bot(config: Config) -> None:
         await bot.session.close()
 
 
+def kill_other_instances() -> None:
+    """Kendi PID'miz dışındaki diğer python -m bot süreçlerini bulur ve sonlandırır."""
+    import os
+    import signal
+    try:
+        my_pid = os.getpid()
+        if sys.platform.startswith("linux"):
+            for pid_dir in Path("/proc").iterdir():
+                if not pid_dir.is_dir() or not pid_dir.name.isdigit():
+                    continue
+                pid = int(pid_dir.name)
+                if pid == my_pid:
+                    continue
+                try:
+                    cmdline_file = pid_dir / "cmdline"
+                    if cmdline_file.exists():
+                        cmdline = cmdline_file.read_text().replace("\x00", " ")
+                        if "-m bot" in cmdline or "python -m bot" in cmdline:
+                            # logging might not be fully configured yet, use print and fallback logger
+                            print(f"Diğer bot süreci bulundu (PID {pid}), sonlandırılıyor...")
+                            os.kill(pid, signal.SIGKILL)
+                            time.sleep(0.5)
+                except Exception:
+                    pass
+    except Exception as exc:
+        print(f"Diğer süreçler kontrol edilirken hata: {exc}", file=sys.stderr)
+
+
 def main() -> int:
+    kill_other_instances()
     parser = argparse.ArgumentParser(
         prog="python -m bot",
         description="Telegram onaylı Drive → YouTube yükleme botu",
