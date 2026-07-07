@@ -135,6 +135,7 @@ class StudioUploader:
         description: str,
         channel_name: str,
         thumbnail_path: Path | None = None,
+        tags: list[str] | None = None,
         on_progress: ProgressCallback | None = None,
         on_screenshot: ScreenshotCallback | None = None,
     ) -> str:
@@ -173,7 +174,7 @@ class StudioUploader:
                 logger.info("Video dosyası verildi: %s", video_path.name)
 
                 step = "başlık/açıklama girme"
-                await self._fill_details(page, title, description)
+                await self._fill_details(page, title, description, tags)
 
                 step = "thumbnail yükleme"
                 await self._set_thumbnail(page, thumbnail_path, on_progress)
@@ -376,10 +377,40 @@ class StudioUploader:
                     await self._safe_screenshot(page),
                 )
 
-    async def _fill_details(self, page: Page, title: str, description: str) -> None:
+    async def _fill_details(self, page: Page, title: str, description: str, tags: list[str] | None = None) -> None:
         await self._fill_textbox(page, SELECTORS["title_box"], title, "Başlık")
         if description:
             await self._fill_textbox(page, SELECTORS["description_box"], description, "Açıklama")
+        if tags:
+            await self._set_tags(page, tags)
+
+    async def _set_tags(self, page: Page, tags: list[str]) -> None:
+        """Video etiketlerini YouTube Studio'ya girer."""
+        try:
+            show_more_text = ["Daha fazla göster", "Show more", "SHOW MORE"]
+            for text in show_more_text:
+                btn = page.get_by_text(text, exact=False).first
+                try:
+                    await btn.click(timeout=3_000)
+                    logger.info("Daha fazla göster tıklandı.")
+                    await _human_pause(0.5, 1.0)
+                    break
+                except PlaywrightTimeoutError:
+                    continue
+            else:
+                await page.locator("#toggle-button").first.click(timeout=3_000)
+                await _human_pause(0.5, 1.0)
+
+            tags_str = ", ".join(tags)
+            tags_input = page.locator("#tags-container #text-input, #tags-container input[type=text]").first
+            await tags_input.wait_for(state="visible", timeout=5_000)
+            await tags_input.click()
+            await tags_input.fill(tags_str)
+            await tags_input.press("Enter")
+            await _human_pause(0.5, 1.0)
+            logger.info("Etiketler girildi: %s", tags_str)
+        except Exception as exc:
+            logger.warning("Etiketler girilirken hata oluştu: %s", exc)
 
     async def _set_thumbnail(self, page: Page, thumbnail_path: Path | None,
                              on_progress: ProgressCallback | None) -> None:

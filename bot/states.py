@@ -13,6 +13,8 @@ class UploadFlow(StatesGroup):
     choosing_saved_image = State()
     waiting_photo = State()
     confirming_save_image = State()
+    choosing_tags = State()
+    adding_new_tag = State()
     confirming_title = State()
     editing_title = State()
     confirming_description = State()

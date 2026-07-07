@@ -56,6 +56,11 @@ CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
     value TEXT
 );
+CREATE TABLE IF NOT EXISTS tags (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    name          TEXT NOT NULL UNIQUE,
+    is_default    INTEGER NOT NULL DEFAULT 0
+);
 """
 
 
@@ -78,6 +83,10 @@ def init_db(path: Path) -> None:
     _db_path = path
     with closing(_connect()) as conn, conn:
         conn.executescript(_SCHEMA)
+        # Varsayılan etiketleri ekle
+        default_tags = ["Ertugrul Gulec besteleri", "Ertugrul Gulec songs", "Ertugrul Gulec"]
+        for tag in default_tags:
+            conn.execute("INSERT OR IGNORE INTO tags (name, is_default) VALUES (?, 1)", (tag,))
     logger.info("SQLite hazır: %s", path)
 
 
@@ -101,8 +110,8 @@ def sync_folders(drive_folders: list[dict[str, Any]]) -> list[sqlite3.Row]:
                 (f["id"], f["name"], f.get("createdTime"), _now()),
             )
         rows = conn.execute(
-            "SELECT * FROM folders WHERE status IN (?, ?) ORDER BY created_time DESC",
-            (STATUS_NEW, STATUS_ERROR),
+            "SELECT * FROM folders WHERE status != ? ORDER BY created_time DESC",
+            (STATUS_SKIPPED,),
         ).fetchall()
     return rows
 
@@ -266,3 +275,38 @@ def set_setting(key: str, value: str) -> None:
             " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             (key, value),
         )
+
+
+# ---------------------------------------------------------------- tags
+
+def list_tags() -> list[sqlite3.Row]:
+    with closing(_connect()) as conn:
+        return conn.execute("SELECT * FROM tags ORDER BY id").fetchall()
+
+
+def add_tag(name: str) -> bool:
+    try:
+        with closing(_connect()) as conn, conn:
+            conn.execute("INSERT INTO tags (name) VALUES (?)", (name,))
+        return True
+    except sqlite3.IntegrityError:
+        return False
+
+
+def delete_tag(tag_id: int) -> None:
+    with closing(_connect()) as conn, conn:
+        conn.execute("DELETE FROM tags WHERE id = ?", (tag_id,))
+
+
+def get_uploaded_channels_for_folder(folder_id: str) -> list[str]:
+    with closing(_connect()) as conn:
+        rows = conn.execute(
+            "SELECT channel_name FROM uploads WHERE folder_id = ?", (folder_id,)
+        ).fetchall()
+        return [r["channel_name"] for r in rows]
+
+
+def get_all_channel_names() -> list[str]:
+    with closing(_connect()) as conn:
+        rows = conn.execute("SELECT display_name FROM channels").fetchall()
+        return [r["display_name"] for r in rows]

@@ -67,6 +67,7 @@ class UploadJob:
     title: str
     description: str
     audio_file: dict[str, Any]
+    tags: list[str] = field(default_factory=list)
     audio_path: Path | None = None
     video_path: Path | None = None
     created_at: datetime = field(default_factory=datetime.now)
@@ -129,31 +130,47 @@ async def cmd_baslat(message: Message, state: FSMContext) -> None:
         return
 
     new_folders = db.sync_folders(folders)
+    all_channels = db.get_all_channel_names()
+    rows = []
+    
+    for f in new_folders:
+        uploaded = db.get_uploaded_channels_for_folder(f['folder_id'])
+        if all_channels and set(uploaded) >= set(all_channels):
+            continue
+            
+        status_parts = []
+        for chan in all_channels:
+            short_name = chan[:8] + ".." if len(chan) > 8 else chan
+            icon = "✅" if chan in uploaded else "❌"
+            status_parts.append(f"{short_name}{icon}")
+        status_str = " (" + ", ".join(status_parts) + ")" if status_parts else ""
+        
+        icon = '⚠️' if f['status'] == db.STATUS_ERROR else '📁'
+        text = f"{icon} {f['folder_name']}{status_str}"
+        if len(text) > 60:
+            text = text[:57] + "..."
+            
+        rows.append([
+            InlineKeyboardButton(text=text, callback_data=f"folder:{f['folder_id']}")
+        ])
+
     db.set_setting(LAST_SCAN_KEY, datetime.now().isoformat(timespec="seconds"))
 
-    if not new_folders:
+    if not rows:
         last_scan = db.get_setting(LAST_SCAN_KEY)
         keyboard = InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text="📜 Geçmişi göster", callback_data="history")
         ]])
         await _safe_edit(scan_msg, "Yeni klasör yok.")
         await scan_msg.edit_text(
-            f"Yeni klasör yok. Son tarama: {fmt_date(last_scan, '%d.%m.%Y %H:%M')}",
+            f"Yeni veya tamamlanmamış klasör yok. Son tarama: {fmt_date(last_scan, '%d.%m.%Y %H:%M')}",
             reply_markup=keyboard,
         )
         return
 
-    rows = [
-        [InlineKeyboardButton(
-            text=(f"{'⚠️' if f['status'] == db.STATUS_ERROR else '📁'} "
-                  f"{f['folder_name']} — {fmt_date(f['created_time'])}"),
-            callback_data=f"folder:{f['folder_id']}",
-        )]
-        for f in new_folders
-    ]
     rows.append([cancel_button()])
     await state.set_state(UploadFlow.choosing_folder)
-    await _safe_edit(scan_msg, f"🔍 Tarama bitti — {len(new_folders)} yeni klasör bulundu.")
+    await _safe_edit(scan_msg, f"🔍 Tarama bitti — {len(rows) - 1} klasör yüklenebilir durumda.")
     await scan_msg.answer(
         "Yüklenecek klasörü seçin:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
@@ -241,14 +258,26 @@ async def cb_choose_folder(callback: CallbackQuery, state: FSMContext) -> None:
         await state.clear()
         return
 
-    rows = [[InlineKeyboardButton(text=f"📺 {c['display_name']}", callback_data=f"channel:{c['id']}")]
-            for c in channels]
+    uploaded_channels = db.get_uploaded_channels_for_folder(folder_id)
+    rows = []
+    for c in channels:
+        is_uploaded = c['display_name'] in uploaded_channels
+        text = f"📺 {c['display_name']}" + (" (Yüklendi ✅)" if is_uploaded else "")
+        cb_data = f"already_uploaded:{c['display_name']}" if is_uploaded else f"channel:{c['id']}"
+        rows.append([InlineKeyboardButton(text=text, callback_data=cb_data)])
+        
     rows.append([cancel_button()])
     await state.set_state(UploadFlow.choosing_channel)
     await callback.message.answer(
         "Hangi kanala yüklensin?",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
     )
+
+
+@router.callback_query(F.data.startswith("already_uploaded:"))
+async def cb_already_uploaded(callback: CallbackQuery) -> None:
+    channel_name = callback.data.split(":", 1)[1]
+    await callback.answer(f"⚠️ Bu klasör zaten '{channel_name}' kanalına yüklendi!", show_alert=True)
 
 
 # ============================================================ kanal seçimi
@@ -318,7 +347,7 @@ async def cb_channel_image_keep(callback: CallbackQuery, state: FSMContext) -> N
         return
     await state.update_data(image_path=saved_path, image_is_temp=False)
     await callback.answer("Kanal görseliyle devam ediliyor.")
-    await _ask_title(callback.message, state)
+    await _ask_tags(callback.message, state)
 
 
 @router.callback_query(UploadFlow.confirming_channel_image, F.data == "chimg:change")
@@ -370,7 +399,7 @@ async def cb_choose_saved_image(callback: CallbackQuery, state: FSMContext) -> N
     data = await state.get_data()
     _remember_channel_image(data.get("channel_id"), image["file_path"])
     await callback.answer(f"Seçildi: {image['display_name']}")
-    await _ask_title(callback.message, state)
+    await _ask_tags(callback.message, state)
 
 
 @router.callback_query(UploadFlow.choosing_image_source, F.data == "imgsrc:upload")
@@ -424,6 +453,134 @@ async def cb_save_image(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.answer("Kütüphaneye kaydedildi.")
     else:
         await callback.answer("Sadece bu yükleme için kullanılacak.")
+    await _ask_tags(callback.message, state)
+
+
+# ============================================================ etiketler
+
+def _get_tags_keyboard(tags: list[Any], selected_tags: list[str]) -> InlineKeyboardMarkup:
+    rows = []
+    for t in tags:
+        name = t["name"]
+        icon = "✅" if name in selected_tags else "⬜"
+        rows.append([
+            InlineKeyboardButton(text=f"{icon} {name}", callback_data=f"tag:toggle:{t['id']}")
+        ])
+    
+    rows.append([
+        InlineKeyboardButton(text="Tümünü Seç", callback_data="tag:select_all"),
+        InlineKeyboardButton(text="Temizle", callback_data="tag:clear_all")
+    ])
+    rows.append([
+        InlineKeyboardButton(text="➕ Yeni etiket ekle", callback_data="tag:add_new")
+    ])
+    rows.append([
+        InlineKeyboardButton(text="Devam Et ➡️", callback_data="tag:continue")
+    ])
+    rows.append([cancel_button()])
+    
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _ask_tags(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    selected_tags = data.get("selected_tags")
+    
+    if selected_tags is None:
+        db_tags = db.list_tags()
+        selected_tags = [t["name"] for t in db_tags if t["is_default"] == 1]
+        await state.update_data(selected_tags=selected_tags)
+        
+    db_tags = db.list_tags()
+    keyboard = _get_tags_keyboard(db_tags, selected_tags)
+    
+    await state.set_state(UploadFlow.choosing_tags)
+    await message.answer(
+        "🏷️ <b>Videoya eklenecek etiketleri seçin:</b>\n"
+        "(YouTube Studio'da gelişmiş ayarlara eklenecektir)",
+        reply_markup=keyboard
+    )
+
+
+@router.callback_query(UploadFlow.choosing_tags, F.data.startswith("tag:toggle:"))
+async def cb_tag_toggle(callback: CallbackQuery, state: FSMContext) -> None:
+    tag_id = int(callback.data.split(":", 2)[2])
+    db_tags = db.list_tags()
+    tag = next((t for t in db_tags if t["id"] == tag_id), None)
+    if tag is None:
+        await callback.answer("Etiket bulunamadı.")
+        return
+        
+    data = await state.get_data()
+    selected_tags = list(data.get("selected_tags", []))
+    
+    if tag["name"] in selected_tags:
+        selected_tags.remove(tag["name"])
+        await callback.answer(f"Çıkarıldı: {tag['name']}")
+    else:
+        selected_tags.append(tag["name"])
+        await callback.answer(f"Eklendi: {tag['name']}")
+        
+    await state.update_data(selected_tags=selected_tags)
+    
+    keyboard = _get_tags_keyboard(db_tags, selected_tags)
+    await callback.message.edit_reply_markup(reply_markup=keyboard)
+
+
+@router.callback_query(UploadFlow.choosing_tags, F.data == "tag:select_all")
+async def cb_tag_select_all(callback: CallbackQuery, state: FSMContext) -> None:
+    db_tags = db.list_tags()
+    selected_tags = [t["name"] for t in db_tags]
+    await state.update_data(selected_tags=selected_tags)
+    await callback.answer("Tüm etiketler seçildi.")
+    
+    keyboard = _get_tags_keyboard(db_tags, selected_tags)
+    await callback.message.edit_reply_markup(reply_markup=keyboard)
+
+
+@router.callback_query(UploadFlow.choosing_tags, F.data == "tag:clear_all")
+async def cb_tag_clear_all(callback: CallbackQuery, state: FSMContext) -> None:
+    db_tags = db.list_tags()
+    selected_tags = []
+    await state.update_data(selected_tags=selected_tags)
+    await callback.answer("Tüm seçimler temizlendi.")
+    
+    keyboard = _get_tags_keyboard(db_tags, selected_tags)
+    await callback.message.edit_reply_markup(reply_markup=keyboard)
+
+
+@router.callback_query(UploadFlow.choosing_tags, F.data == "tag:add_new")
+async def cb_tag_add_new(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(UploadFlow.adding_new_tag)
+    await callback.message.answer(
+        "➕ Lütfen eklemek istediğiniz <b>yeni etiketi</b> yazın:\n"
+        "(Örn: <code>yeni beste</code>)",
+        reply_markup=cancel_keyboard()
+    )
+    await callback.answer()
+
+
+@router.message(UploadFlow.adding_new_tag, F.text)
+async def msg_add_new_tag(message: Message, state: FSMContext) -> None:
+    tag_name = message.text.strip()
+    if not tag_name:
+        await message.answer("Etiket boş olamaz.")
+        return
+        
+    db.add_tag(tag_name)
+    data = await state.get_data()
+    selected_tags = list(data.get("selected_tags", []))
+    if tag_name not in selected_tags:
+        selected_tags.append(tag_name)
+    await state.update_data(selected_tags=selected_tags)
+    
+    await message.answer(f"✅ Yeni etiket eklendi ve seçildi: <code>{esc(tag_name)}</code>")
+    await _ask_tags(message, state)
+
+
+@router.callback_query(UploadFlow.choosing_tags, F.data == "tag:continue")
+async def cb_tag_continue(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
     await _ask_title(callback.message, state)
 
 
@@ -612,6 +769,7 @@ async def cb_upload_go(callback: CallbackQuery, state: FSMContext, bot: Bot) -> 
         title=data["title"],
         description=data.get("description", ""),
         audio_file=data["audio_file"],
+        tags=data.get("selected_tags", []),
     )
     asyncio.create_task(_run_pipeline(bot, job))
 
@@ -686,6 +844,7 @@ async def _run_pipeline(bot: Bot, job: UploadJob) -> None:
                     description=job.description,
                     channel_name=job.channel_name,
                     thumbnail_path=cfg.default_thumbnail,
+                    tags=job.tags,
                     on_progress=on_progress,
                     on_screenshot=on_screenshot,
                 ),
