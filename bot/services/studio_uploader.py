@@ -146,6 +146,8 @@ class StudioUploader:
             StudioUploadError: Herhangi bir adım başarısız olursa (ekran
                 görüntüsüyle birlikte).
         """
+        self._on_progress = on_progress
+        self._on_screenshot = on_screenshot
         step = "tarayıcı başlatma"
         async with async_playwright() as pw:
             launch_kwargs: dict = {
@@ -162,22 +164,28 @@ class StudioUploader:
             try:
                 step = "oturum kontrolü"
                 await self._check_session(page)
+                await self._handle_identity_check(page)
 
                 step = "kanal değiştirme"
                 await self._ensure_channel(context, page, channel_name)
+                await self._handle_identity_check(page)
 
                 step = "yükleme diyaloğunu açma"
                 await self._open_upload_dialog(page)
+                await self._handle_identity_check(page)
 
                 step = "video dosyasını verme"
                 await page.locator(SELECTORS["file_input"]).first.set_input_files(str(video_path))
                 logger.info("Video dosyası verildi: %s", video_path.name)
+                await self._handle_identity_check(page)
 
                 step = "başlık/açıklama girme"
                 await self._fill_details(page, title, description, tags)
+                await self._handle_identity_check(page)
 
                 step = "thumbnail yükleme"
                 await self._set_thumbnail(page, thumbnail_path, on_progress)
+                await self._handle_identity_check(page)
 
                 step = "kitle (çocuk) seçimi"
                 await self._set_not_for_kids(page)
@@ -232,22 +240,85 @@ class StudioUploader:
                 "çalıştırıp yeniden giriş yapın."
             )
         await self._dismiss_browser_warning(page)
-        await self._fail_if_identity_check(page)
+        # Check identity verification during startup session check too
+        is_verify = await self._handle_identity_check(page)
+        if not is_verify and any(t in page.url for t in ["accounts.google.com", "signin"]):
+            raise SessionExpiredError(
+                "Google 'Kimliğinizi doğrulayın' diyaloğu çıktı ve onaylanmadı veya oturum düşmüş."
+            )
 
-    async def _fail_if_identity_check(self, page: Page) -> None:
-        """Google'ın 'Kimliğinizi doğrulayın' diyaloğu tüm tıklamaları engeller;
-        elle doğrulama gerektiği için anlaşılır bir hatayla durulur."""
+    async def _handle_identity_check(self, page: Page) -> bool:
+        """Google'ın 'Kimliğinizi doğrulayın' diyaloğu çıktığında bota bildirim
+        gönderip telefon onay ekranını bekler.
+        """
+        import time
+        is_identity_dialog = False
         for text in TEXTS["verify_identity"]:
             modal = page.get_by_text(text, exact=False).first
             try:
-                if await modal.is_visible(timeout=1_500):
-                    raise SessionExpiredError(
-                        "Google 'Kimliğinizi doğrulayın' diyaloğu çıkardı. Bilgisayarda "
-                        "'python -m bot --login-setup' çalıştırıp açılan pencerede "
-                        "doğrulamayı tamamlayın, sonra tekrar deneyin."
-                    )
-            except PlaywrightTimeoutError:
+                if await modal.is_visible(timeout=100):
+                    is_identity_dialog = True
+                    break
+            except Exception:
                 continue
+
+        if not is_identity_dialog:
+            return False
+
+        logger.info("Kimliğinizi doğrulayın diyaloğu tespit edildi! İşlem duraklatılıyor...")
+        if self._on_progress:
+            await self._on_progress("🔑 Google kimlik doğrulaması istedi. 'Sonraki' butonuna basılıyor...")
+
+        next_button = None
+        for btn_text in ["Sonraki", "Next"]:
+            btn = page.get_by_role("button", name=btn_text).first
+            try:
+                if await btn.is_visible(timeout=3000):
+                    next_button = btn
+                    break
+            except Exception:
+                continue
+
+        if not next_button:
+            # Fallback ytcp button selector
+            next_button = page.locator("ytcp-button[id=confirm-button], paper-button[id=confirm-button]").first
+
+        try:
+            await next_button.click(timeout=5000)
+            logger.info("Doğrulama Sonraki butonuna tıklandı.")
+        except Exception as exc:
+            logger.warning("Sonraki butonuna tıklanamadı: %s", exc)
+
+        # Onay ekranının yüklenmesi için bekle
+        await asyncio.sleep(4)
+
+        screenshot = await self._safe_screenshot(page)
+        if screenshot and self._on_screenshot:
+            await self._on_screenshot(
+                screenshot,
+                "⚠️ **Google Kimlik Doğrulaması gerekiyor!**\n\n"
+                "Google güvenlik uyarısı çıkardı. Lütfen telefonunuza gelen bildirimi onaylayın "
+                "(ekranda numara varsa telefonunuzdan aynı numarayı seçin).\n"
+                "Onayladıktan sonra bot otomatik olarak devam edecektir. (Zaman aşımı: 90 saniye)"
+            )
+
+        start_time = time.time()
+        approved = False
+        while time.time() - start_time < 90:
+            if "studio.youtube.com" in page.url and "accounts.google.com" not in page.url:
+                approved = True
+                break
+            await asyncio.sleep(3)
+
+        if approved:
+            logger.info("Doğrulama telefondan onaylandı, devam ediliyor!")
+            if self._on_progress:
+                await self._on_progress("✅ Kimlik doğrulaması telefondan onaylandı! Yüklemeye devam ediliyor...")
+            await asyncio.sleep(3)
+            return True
+        else:
+            logger.warning("Kimlik doğrulaması onaylanmadı (zaman aşımı).")
+            return False
 
     async def _dismiss_browser_warning(self, page: Page) -> None:
         """Studio'nun 'desteklenmeyen tarayıcı' ara sayfasını (çıkarsa) geçer."""
