@@ -94,14 +94,9 @@ def init_db(path: Path) -> None:
 
 def sync_folders(drive_folders: list[dict[str, Any]]) -> list[sqlite3.Row]:
     """Drive'dan gelen klasörleri DB ile eşitler; DB'de olmayanları 'yeni' ekler.
-
-    Args:
-        drive_folders: her biri ``{"id", "name", "createdTime"}`` içeren sözlükler.
-
-    Returns:
-        Eklenenler dahil, durumu 'yeni' veya 'hata' olan tüm klasör satırları
-        (hata alanlar yeniden denenebilsin diye listede kalır).
+    Ayrıca Drive'da artık var olmayan aktif klasörleri veritabanından siler veya atlandı olarak işaretler.
     """
+    drive_ids = {f["id"] for f in drive_folders}
     with closing(_connect()) as conn, conn:
         for f in drive_folders:
             conn.execute(
@@ -109,6 +104,22 @@ def sync_folders(drive_folders: list[dict[str, Any]]) -> list[sqlite3.Row]:
                 " VALUES (?, ?, ?, ?)",
                 (f["id"], f["name"], f.get("createdTime"), _now()),
             )
+        
+        # Drive'da artık olmayan aktif klasörleri bulup temizle
+        db_active = conn.execute(
+            "SELECT folder_id FROM folders WHERE status != ?",
+            (STATUS_SKIPPED,),
+        ).fetchall()
+        
+        for row in db_active:
+            fid = row["folder_id"]
+            if fid not in drive_ids:
+                has_upload = conn.execute("SELECT 1 FROM uploads WHERE folder_id = ?", (fid,)).fetchone()
+                if has_upload:
+                    conn.execute("UPDATE folders SET status = ? WHERE folder_id = ?", (STATUS_SKIPPED, fid))
+                else:
+                    conn.execute("DELETE FROM folders WHERE folder_id = ?", (fid,))
+
         rows = conn.execute(
             "SELECT * FROM folders WHERE status != ? ORDER BY created_time DESC",
             (STATUS_SKIPPED,),
