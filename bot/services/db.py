@@ -137,7 +137,11 @@ def set_folder_status(folder_id: str, status: str, *, video_url: str | None = No
 
 def delete_folder(folder_id: str) -> None:
     with closing(_connect()) as conn, conn:
-        conn.execute("DELETE FROM folders WHERE folder_id = ?", (folder_id,))
+        has_upload = conn.execute("SELECT 1 FROM uploads WHERE folder_id = ?", (folder_id,)).fetchone()
+        if has_upload:
+            conn.execute("UPDATE folders SET status = ? WHERE folder_id = ?", (STATUS_SKIPPED, folder_id))
+        else:
+            conn.execute("DELETE FROM folders WHERE folder_id = ?", (folder_id,))
 
 
 def get_new_and_error_folders() -> list[sqlite3.Row]:
