@@ -189,8 +189,31 @@ def download_file(file: dict[str, Any], destination: Path) -> Path:
 
 @_with_retry
 def trash_file(file_id: str) -> None:
-    """Klasörü veya dosyayı Drive çöp kutusuna taşır."""
+    """Klasörü veya dosyayı Drive çöp kutusuna taşır veya paylaşılan klasörden kaldırır."""
     service = get_service()
-    service.files().update(fileId=file_id, body={"trashed": True}).execute()
-    logger.info("Drive çöp kutusuna taşındı: %s", file_id)
+    try:
+        service.files().update(fileId=file_id, body={"trashed": True}).execute()
+        logger.info("Drive çöp kutusuna taşındı: %s", file_id)
+    except HttpError as exc:
+        if exc.resp.status == 403 and "insufficientFilePermissions" in str(exc):
+            cfg = get_config()
+            root_parent = cfg.drive_root_folder_id
+            try:
+                file_meta = service.files().get(fileId=file_id, fields="parents").execute()
+                parents = file_meta.get("parents", [])
+            except Exception:
+                parents = []
+            
+            if root_parent in parents:
+                service.files().update(fileId=file_id, removeParents=root_parent).execute()
+                logger.info("Drive klasörü ana klasörden kaldırıldı (sahibi olunmadığı için): %s", file_id)
+            elif parents:
+                remove_str = ",".join(parents)
+                service.files().update(fileId=file_id, removeParents=remove_str).execute()
+                logger.info("Drive klasörü ebeveynlerinden kaldırıldı: %s", file_id)
+            else:
+                service.files().update(fileId=file_id, removeParents=root_parent).execute()
+                logger.info("Drive klasörü ana klasörden (doğrudan) kaldırıldı: %s", file_id)
+        else:
+            raise
 
