@@ -161,8 +161,7 @@ async def cmd_baslat(message: Message, state: FSMContext) -> None:
             text = f"{icon} {f['folder_name']}"
             
         rows.append([
-            InlineKeyboardButton(text=text, callback_data=f"folder:{f['folder_id']}"),
-            InlineKeyboardButton(text="🗑️", callback_data=f"trash:{f['folder_id']}"),
+            InlineKeyboardButton(text=text, callback_data=f"folder:{f['folder_id']}")
         ])
 
     db.set_setting(LAST_SCAN_KEY, datetime.now().isoformat(timespec="seconds"))
@@ -220,49 +219,49 @@ async def cb_cancel(callback: CallbackQuery, state: FSMContext) -> None:
 
 # ============================================================ klasör silme
 
-@router.callback_query(UploadFlow.choosing_folder, F.data.startswith("trash:"))
-async def cb_trash_folder(callback: CallbackQuery, state: FSMContext) -> None:
-    folder_id = callback.data.split(":", 1)[1]
+@router.callback_query(F.data.startswith("pipeline_trash:ask:"))
+async def cb_pipeline_trash_ask(callback: CallbackQuery) -> None:
+    folder_id = callback.data.split(":", 2)[2]
     folder = db.get_folder(folder_id)
-    if folder is None:
-        await callback.answer("Klasör kaydı bulunamadı.", show_alert=True)
-        return
-    await callback.answer()
+    folder_name = folder["folder_name"] if folder else "Klasör"
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="✅ Evet, Sil", callback_data=f"confirm_trash:{folder_id}"),
-            InlineKeyboardButton(text="❌ İptal", callback_data="cancel_trash"),
+            InlineKeyboardButton(text="✅ Evet, Eminim", callback_data=f"pipeline_trash:confirm:{folder_id}"),
+            InlineKeyboardButton(text="❌ Hayır, İptal", callback_data=f"pipeline_trash:cancel:{folder_id}")
         ]
     ])
     await callback.message.edit_text(
-        f"⚠️ <b>{esc(folder['folder_name'])}</b> klasörünü Google Drive çöp kutusuna taşımak istediğinize emin misiniz?",
-        reply_markup=keyboard,
+        f"⚠️ <b>{esc(folder_name)}</b> klasörünü Google Drive çöp kutusuna taşımak istediğinize <b>kesin olarak emin misiniz</b>?",
+        reply_markup=keyboard
     )
+    await callback.answer()
 
 
-@router.callback_query(UploadFlow.choosing_folder, F.data.startswith("confirm_trash:"))
-async def cb_confirm_trash(callback: CallbackQuery, state: FSMContext) -> None:
-    folder_id = callback.data.split(":", 1)[1]
+@router.callback_query(F.data.startswith("pipeline_trash:confirm:"))
+async def cb_pipeline_trash_confirm(callback: CallbackQuery) -> None:
+    folder_id = callback.data.split(":", 2)[2]
     folder = db.get_folder(folder_id)
-    if folder is None:
-        await callback.answer("Klasör kaydı bulunamadı.", show_alert=True)
-        return
+    folder_name = folder["folder_name"] if folder else "Klasör"
 
-    await callback.answer("Siliniyor...")
     await callback.message.edit_text("⏳ Klasör siliniyor, lütfen bekleyin...")
-
     try:
         await asyncio.to_thread(drive.trash_file, folder_id)
         db.delete_folder(folder_id)
-        RETRY_JOBS.pop(folder_id, None)
-        await callback.message.answer(f"✅ <b>{esc(folder['folder_name'])}</b> başarıyla çöp kutusuna taşındı.")
+        await callback.message.edit_text(f"✅ <b>{esc(folder_name)}</b> başarıyla çöp kutusuna taşındı ve kaydı silindi.")
     except Exception as exc:
-        logger.exception("Klasör silinirken hata oluştu.")
-        await callback.message.answer(f"❌ Klasör silinemedi: {esc(str(exc))}")
+        logger.exception("Klasör silinirken hata.")
+        await callback.message.edit_text(f"❌ Klasör silinemedi: {esc(str(exc))}")
+    await callback.answer()
 
-    await state.clear()
-    await cmd_baslat(callback.message, state)
+
+@router.callback_query(F.data.startswith("pipeline_trash:cancel:"))
+async def cb_pipeline_trash_cancel(callback: CallbackQuery) -> None:
+    try:
+        await callback.message.delete()
+    except Exception:  # noqa: BLE001
+        pass
+    await callback.answer("İşlem iptal edildi.")
 
 
 @router.callback_query(UploadFlow.choosing_folder, F.data == "trash_all")
@@ -1051,6 +1050,19 @@ async def _run_pipeline(bot: Bot, job: UploadJob) -> None:
                 job.chat_id,
                 f"✅ <b>Yayınlandı!</b>\n🎬 {esc(job.title)}\n📺 {esc(job.channel_name)}\n🔗 {esc(video_url)}",
                 disable_web_page_preview=False,
+            )
+
+            # Çöpe atma sorgusu
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="🗑️ Evet, Çöpe At", callback_data=f"pipeline_trash:ask:{job.folder_id}"),
+                    InlineKeyboardButton(text="❌ Hayır", callback_data=f"pipeline_trash:cancel:{job.folder_id}")
+                ]
+            ])
+            await bot.send_message(
+                job.chat_id,
+                f"📂 <b>{esc(job.folder_name)}</b> klasörünü Google Drive çöp kutusuna taşımak ister misiniz?",
+                reply_markup=keyboard,
             )
 
         except SessionExpiredError as exc:
