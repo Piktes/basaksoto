@@ -148,6 +148,14 @@ def get_new_and_error_folders() -> list[sqlite3.Row]:
         ).fetchall()
 
 
+def get_active_folders() -> list[sqlite3.Row]:
+    with closing(_connect()) as conn:
+        return conn.execute(
+            "SELECT * FROM folders WHERE status != ? ORDER BY created_time DESC",
+            (STATUS_SKIPPED,),
+        ).fetchall()
+
+
 # ---------------------------------------------------------------- uploads
 
 def record_upload(folder_id: str, title: str, channel_name: str, video_url: str) -> None:

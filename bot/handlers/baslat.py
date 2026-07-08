@@ -267,9 +267,9 @@ async def cb_pipeline_trash_cancel(callback: CallbackQuery) -> None:
 @router.callback_query(UploadFlow.choosing_folder, F.data == "trash_all")
 async def cb_trash_all(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
-    folders = db.get_new_and_error_folders()
+    folders = db.get_active_folders()
     if not folders:
-        await callback.message.answer("Silinecek yeni klasör bulunamadı.")
+        await callback.message.answer("Silinecek klasör bulunamadı.")
         await state.clear()
         return
 
@@ -280,16 +280,16 @@ async def cb_trash_all(callback: CallbackQuery, state: FSMContext) -> None:
         ]
     ])
     await callback.message.edit_text(
-        f"⚠️ Listedeki <b>tüm yeni klasörleri ({len(folders)} adet)</b> Google Drive çöp kutusuna taşımak istediğinize emin misiniz?",
+        f"⚠️ Listedeki <b>tüm klasörleri ({len(folders)} adet)</b> Google Drive çöp kutusuna taşımak istediğinize emin misiniz?",
         reply_markup=keyboard,
     )
 
 
 @router.callback_query(UploadFlow.choosing_folder, F.data == "confirm_trash_all")
 async def cb_confirm_trash_all(callback: CallbackQuery, state: FSMContext) -> None:
-    folders = db.get_new_and_error_folders()
+    folders = db.get_active_folders()
     if not folders:
-        await callback.answer("Silinecek yeni klasör bulunamadı.", show_alert=True)
+        await callback.answer("Silinecek klasör bulunamadı.", show_alert=True)
         await state.clear()
         return
 
