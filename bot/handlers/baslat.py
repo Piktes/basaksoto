@@ -161,7 +161,8 @@ async def cmd_baslat(message: Message, state: FSMContext) -> None:
             text = f"{icon} {f['folder_name']}"
             
         rows.append([
-            InlineKeyboardButton(text=text, callback_data=f"folder:{f['folder_id']}")
+            InlineKeyboardButton(text=text, callback_data=f"folder:{f['folder_id']}"),
+            InlineKeyboardButton(text="🗑️", callback_data=f"trash:{f['folder_id']}"),
         ])
 
     db.set_setting(LAST_SCAN_KEY, datetime.now().isoformat(timespec="seconds"))
@@ -178,6 +179,9 @@ async def cmd_baslat(message: Message, state: FSMContext) -> None:
         )
         return
 
+    rows.append([
+        InlineKeyboardButton(text="🧹 Tümünü Çöpe At", callback_data="trash_all"),
+    ])
     rows.append([cancel_button()])
     await state.set_state(UploadFlow.choosing_folder)
     await _safe_edit(scan_msg, f"🔍 Tarama bitti — {len(rows) - 1} klasör yüklenebilir durumda.")
@@ -212,6 +216,119 @@ async def cb_cancel(callback: CallbackQuery, state: FSMContext) -> None:
         pass
     await callback.message.answer("❌ İşlem iptal edildi.")
     await callback.answer()
+
+
+# ============================================================ klasör silme
+
+@router.callback_query(UploadFlow.choosing_folder, F.data.startswith("trash:"))
+async def cb_trash_folder(callback: CallbackQuery, state: FSMContext) -> None:
+    folder_id = callback.data.split(":", 1)[1]
+    folder = db.get_folder(folder_id)
+    if folder is None:
+        await callback.answer("Klasör kaydı bulunamadı.", show_alert=True)
+        return
+    await callback.answer()
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Evet, Sil", callback_data=f"confirm_trash:{folder_id}"),
+            InlineKeyboardButton(text="❌ İptal", callback_data="cancel_trash"),
+        ]
+    ])
+    await callback.message.edit_text(
+        f"⚠️ <b>{esc(folder['folder_name'])}</b> klasörünü Google Drive çöp kutusuna taşımak istediğinize emin misiniz?",
+        reply_markup=keyboard,
+    )
+
+
+@router.callback_query(UploadFlow.choosing_folder, F.data.startswith("confirm_trash:"))
+async def cb_confirm_trash(callback: CallbackQuery, state: FSMContext) -> None:
+    folder_id = callback.data.split(":", 1)[1]
+    folder = db.get_folder(folder_id)
+    if folder is None:
+        await callback.answer("Klasör kaydı bulunamadı.", show_alert=True)
+        return
+
+    await callback.answer("Siliniyor...")
+    await callback.message.edit_text("⏳ Klasör siliniyor, lütfen bekleyin...")
+
+    try:
+        await asyncio.to_thread(drive.trash_file, folder_id)
+        db.delete_folder(folder_id)
+        RETRY_JOBS.pop(folder_id, None)
+        await callback.message.answer(f"✅ <b>{esc(folder['folder_name'])}</b> başarıyla çöp kutusuna taşındı.")
+    except Exception as exc:
+        logger.exception("Klasör silinirken hata oluştu.")
+        await callback.message.answer(f"❌ Klasör silinemedi: {esc(str(exc))}")
+
+    await state.clear()
+    await cmd_baslat(callback.message, state)
+
+
+@router.callback_query(UploadFlow.choosing_folder, F.data == "trash_all")
+async def cb_trash_all(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    folders = db.get_new_and_error_folders()
+    if not folders:
+        await callback.message.answer("Silinecek yeni klasör bulunamadı.")
+        await state.clear()
+        return
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Evet, Hepsini Sil", callback_data="confirm_trash_all"),
+            InlineKeyboardButton(text="❌ İptal", callback_data="cancel_trash"),
+        ]
+    ])
+    await callback.message.edit_text(
+        f"⚠️ Listedeki <b>tüm yeni klasörleri ({len(folders)} adet)</b> Google Drive çöp kutusuna taşımak istediğinize emin misiniz?",
+        reply_markup=keyboard,
+    )
+
+
+@router.callback_query(UploadFlow.choosing_folder, F.data == "confirm_trash_all")
+async def cb_confirm_trash_all(callback: CallbackQuery, state: FSMContext) -> None:
+    folders = db.get_new_and_error_folders()
+    if not folders:
+        await callback.answer("Silinecek yeni klasör bulunamadı.", show_alert=True)
+        await state.clear()
+        return
+
+    await callback.answer("Hepsi siliniyor...")
+    await callback.message.edit_text(f"⏳ {len(folders)} klasör siliniyor, lütfen bekleyin...")
+
+    success_count = 0
+    fail_count = 0
+
+    for f in folders:
+        try:
+            await asyncio.to_thread(drive.trash_file, f["folder_id"])
+            db.delete_folder(f["folder_id"])
+            RETRY_JOBS.pop(f["folder_id"], None)
+            success_count += 1
+        except Exception:
+            logger.exception("Klasör silinemedi: %s", f["folder_name"])
+            fail_count += 1
+
+    await callback.message.answer(
+        f"🧹 Temizlik tamamlandı:\n"
+        f"✅ {success_count} klasör silindi.\n"
+        f"❌ {fail_count} klasör silinemedi."
+    )
+
+    await state.clear()
+    await cmd_baslat(callback.message, state)
+
+
+@router.callback_query(UploadFlow.choosing_folder, F.data == "cancel_trash")
+async def cb_cancel_trash(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.answer()
+    try:
+        await callback.message.delete()
+    except Exception:  # noqa: BLE001
+        pass
+    await state.clear()
+    await cmd_baslat(callback.message, state)
 
 
 # ============================================================ klasör seçimi

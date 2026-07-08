@@ -135,6 +135,19 @@ def set_folder_status(folder_id: str, status: str, *, video_url: str | None = No
             conn.execute("UPDATE folders SET status=? WHERE folder_id=?", (status, folder_id))
 
 
+def delete_folder(folder_id: str) -> None:
+    with closing(_connect()) as conn, conn:
+        conn.execute("DELETE FROM folders WHERE folder_id = ?", (folder_id,))
+
+
+def get_new_and_error_folders() -> list[sqlite3.Row]:
+    with closing(_connect()) as conn:
+        return conn.execute(
+            "SELECT * FROM folders WHERE status IN (?, ?) ORDER BY created_time DESC",
+            (STATUS_NEW, STATUS_ERROR),
+        ).fetchall()
+
+
 # ---------------------------------------------------------------- uploads
 
 def record_upload(folder_id: str, title: str, channel_name: str, video_url: str) -> None:

@@ -29,7 +29,7 @@ from ..config import get_config
 
 logger = logging.getLogger(__name__)
 
-SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
+SCOPES = ["https://www.googleapis.com/auth/drive"]
 
 AUDIO_EXTENSIONS = (".mp3", ".wav", ".m4a", ".flac")
 DOCX_EXTENSION = ".docx"
@@ -185,3 +185,12 @@ def download_file(file: dict[str, Any], destination: Path) -> Path:
     destination.write_bytes(buffer.getvalue())
     logger.info("İndirildi: %s → %s (%d bayt)", file["name"], destination, destination.stat().st_size)
     return destination
+
+
+@_with_retry
+def trash_file(file_id: str) -> None:
+    """Klasörü veya dosyayı Drive çöp kutusuna taşır."""
+    service = get_service()
+    service.files().update(fileId=file_id, body={"trashed": True}).execute()
+    logger.info("Drive çöp kutusuna taşındı: %s", file_id)
+
