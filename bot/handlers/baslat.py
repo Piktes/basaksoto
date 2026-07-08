@@ -179,7 +179,7 @@ async def cmd_baslat(message: Message, state: FSMContext) -> None:
         return
 
     rows.append([
-        InlineKeyboardButton(text="🧹 Tümünü Çöpe At", callback_data="trash_all"),
+        InlineKeyboardButton(text="🗑️ Tümünü Çöpe At", callback_data="trash_all"),
     ])
     rows.append([cancel_button()])
     await state.set_state(UploadFlow.choosing_folder)
