@@ -183,7 +183,7 @@ async def cmd_baslat(message: Message, state: FSMContext) -> None:
     ])
     rows.append([cancel_button()])
     await state.set_state(UploadFlow.choosing_folder)
-    await _safe_edit(scan_msg, f"🔍 Tarama bitti — {len(rows) - 1} klasör yüklenebilir durumda.")
+    await _safe_edit(scan_msg, f"🔍 Tarama bitti — {len(new_folders)} klasör yüklenebilir durumda.")
     await scan_msg.answer(
         "Yüklenecek klasörü seçin:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
