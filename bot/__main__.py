@@ -20,6 +20,7 @@ from .config import Config, ConfigError, load_config
 from .handlers import all_routers
 from .middlewares.auth import WhitelistMiddleware
 from .services import db
+from .services.scheduler import start_scheduler
 from .services.studio_uploader import login_setup
 from .services.video import VideoError, ensure_ffmpeg
 
@@ -100,6 +101,9 @@ async def run_bot(config: Config) -> None:
     me = await bot.get_me()
     logger.info("Bot başladı: @%s (izinli kullanıcılar: %s)", me.username, config.allowed_user_ids)
     
+    # Zamanlayıcıyı arka planda başlat
+    scheduler_task = start_scheduler(bot, config)
+    
     for user_id in config.allowed_user_ids:
         try:
             await bot.send_message(user_id, "🤖 **Bot aktif ve hazır!**")
@@ -108,6 +112,11 @@ async def run_bot(config: Config) -> None:
     try:
         await dispatcher.start_polling(bot)
     finally:
+        scheduler_task.cancel()
+        try:
+            await scheduler_task
+        except asyncio.CancelledError:
+            pass
         await bot.session.close()
 
 
