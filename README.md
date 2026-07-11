@@ -23,6 +23,7 @@ lokal çalışır.
 - `/istatistik` — haftalık/aylık/toplam rapor, kanal kırılımı, son 10 yükleme
 - `/gorseller` — görsel kütüphanesi (listele/sil); akış içinde telefondan görsel ekleme
 - `/kanallar` — Studio'daki görünen kanal adlarının kaydı (kanal değiştirme buna göre yapılır)
+- **Zamanlanmış Tarama ve Bildirim** — Her gün sabah 09:00, öğlen 14:00 ve akşam 18:00 saatlerinde Drive klasörünü otomatik tarar; hiçbir kanala yüklenmemiş (yükleme sayısı 0 olan) aktif klasörler varsa, yetkili kullanıcılara "bekleyen yüklemeler var" bildirimi gönderir.
 - Whitelist güvenliği: izinsiz kullanıcıya **hiç cevap verilmez**; deneme olursa size
   bildirim gelir (aynı ID için saatte en fazla 1)
 
