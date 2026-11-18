@@ -18,6 +18,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
+from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -88,10 +89,16 @@ def get_service() -> Any:
         creds = Credentials.from_authorized_user_file(str(cfg.token_path), SCOPES)
 
     if not creds or not creds.valid:
+        refreshed = False
         if creds and creds.expired and creds.refresh_token:
             logger.info("Drive token yenileniyor...")
-            creds.refresh(Request())
-        else:
+            try:
+                creds.refresh(Request())
+                refreshed = True
+            except RefreshError:
+                # Refresh token iptal edilmiş/süresi dolmuş: yeniden yetkilendirmeye düş.
+                logger.warning("Drive token yenilenemedi; yeniden yetkilendirme gerekiyor.")
+        if not refreshed:
             if not cfg.client_secret_path.exists():
                 raise DriveError(
                     "credentials/client_secret.json bulunamadı. README'deki Google Cloud "

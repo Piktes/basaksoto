@@ -1,0 +1,11 @@
+.git
+.env
+credentials/
+data/
+logs/
+__pycache__/
+*.py[cod]
+*.bat
+.agents/
+.venv/
+venv/

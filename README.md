@@ -173,6 +173,27 @@ WantedBy=multi-user.target
 sudo systemctl enable --now yt-bot
 ```
 
+### Sunucuda Docker / Dokploy ile çalıştırma
+
+Depodaki `Dockerfile` + `docker-compose.yml` botu sanal ekranlı (Xvfb) bir kapsayıcıda
+çalıştırır; veritabanı, görseller, Google oturumu ve Drive token'ı volume'lerde kalır.
+
+1. Dokploy'da **Compose** servisi oluşturun, kaynak olarak bu depoyu verin
+   (Compose Path: `docker-compose.yml`).
+2. **Environment** sekmesine şunları yazın: `TELEGRAM_BOT_TOKEN`, `ALLOWED_USER_IDS`,
+   `DRIVE_ROOT_FOLDER_ID`, `GOOGLE_CLIENT_SECRET_B64`, `GOOGLE_TOKEN_B64`
+   (iki Google dosyasının base64 hali; Drive izni yerelde alınır, sunucuda tarayıcı
+   açılmaz).
+3. **İlk kurulumda Google girişi:** `ENABLE_VNC=true`, `LOGIN_MODE=true`,
+   `VNC_PASSWORD=...` ekleyin, **Domains** sekmesinden `bot` servisine 6080 portuyla
+   bir alan adı bağlayıp dağıtın → `https://ALAN-ADI/vnc.html` adresinden parolayla
+   bağlanın → açık duran tarayıcıda Google'a giriş yapıp Studio'yu görün.
+4. Girişten sonra `LOGIN_MODE=false` ve `ENABLE_VNC=false` yapıp yeniden dağıtın;
+   bot başlar. Oturum düşerse 3. adımı tekrarlayın.
+
+`/restart` kapsayıcı içinde botu yeniden başlatır. `/guncelle` kapsayıcıda `git pull`
+yapamaz; güncelleme için Dokploy'dan yeniden dağıtın.
+
 ---
 
 ## Kullanım Akışı (özet)
