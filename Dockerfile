@@ -13,7 +13,7 @@ ENV PYTHONUNBUFFERED=1 \
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ffmpeg xvfb x11vnc novnc websockify fluxbox \
-        tzdata tini fonts-liberation fonts-noto-core \
+        tzdata tini fonts-liberation fonts-noto-core libatomic1 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
