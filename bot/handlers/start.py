@@ -13,12 +13,15 @@ _HELP_TEXT = (
     "Drive'daki şarkı klasörlerini tarar, onayınla videoya çevirir ve "
     "YouTube Studio üzerinden Herkese Açık yayınlar.\n\n"
     "<b>Komutlar:</b>\n"
-    "/baslat — Drive'ı tara, yeni klasörden video yükle\n"
+    "/baslat — Drive'ı tara; tek tek ya da toplu (sıralı) video yükle\n"
     "/istatistik — haftalık/aylık yükleme raporu\n"
     "/gorseller — kayıtlı görsel kütüphanesini yönet\n"
     "📷 Bota fotoğraf gönder → kütüphaneye veya thumbnail olarak kaydet\n"
-    "/kanallar — YouTube kanal adlarını yönet\n"
-    "/guncelle — botu en son sürüme güncelle ve yeniden başlat\n"
+    "/kanallar — YouTube kanallarını yönet (otomatik bulma dahil)\n"
+    "/giris — Google oturumu düştüyse uzaktan yeniden giriş\n"
+    "/yedek — veritabanı yedeğini gönder (her gece otomatik de gelir)\n"
+    "💾 Yedek dosyasını (.db) bota gönder → geri yükleme\n"
+    "/temizle — yüklenmiş klasörleri Drive çöp kutusuna taşı\n"
     "/durdur — botu geçici olarak durdurur (yeni yüklemeleri engeller)\n"
     "/restart — botu aktif hale getirir ve yeniden başlatır\n"
     "/yardim — bu mesaj"
@@ -40,7 +43,7 @@ async def cmd_durdur(message: Message) -> None:
     from ..services import db
     db.set_setting("bot_status", "paused")
     await message.answer(
-        "⏸️ **Bot geçici olarak durduruldu.**\n"
+        "⏸️ <b>Bot geçici olarak durduruldu.</b>\n"
         "Yeni yüklemeler engellenmiştir. Botu tekrar aktifleştirmek ve yeniden başlatmak için /restart komutunu kullanabilirsiniz."
     )
 
@@ -50,5 +53,5 @@ async def cmd_restart(message: Message) -> None:
     import sys
     from ..services import db
     db.set_setting("bot_status", "running")
-    await message.answer("🔄 **Bot aktifleştiriliyor ve yeniden başlatılıyor...**\nLütfen bekleyin...")
+    await message.answer("🔄 <b>Bot aktifleştiriliyor ve yeniden başlatılıyor...</b>\nLütfen bekleyin...")
     sys.exit(1)

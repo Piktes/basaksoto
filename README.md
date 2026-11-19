@@ -12,8 +12,17 @@ lokal çalışır.
 
 ## Özellikler
 
-- `/baslat` — Drive ana klasörünü tarar, işlenmemiş yeni alt klasörleri bulur
+- `/baslat` — Drive ana klasörünü tarar; şarkı klasörlerini sayfalı, aranabilir bir
+  listede gösterir (varsayılan: yalnızca bekleyenler)
 - Adım adım onay akışı: klasör → kanal → görsel → başlık → açıklama → son onay → yükle
+- **⚡ Hızlı yükle** — kanalın kayıtlı görseli ve varsayılanlarla doğrudan son kontrol kartı
+- **📦 Toplu yükle** — birden çok klasörü ve kanalı işaretleyip sıraya alın; bot sırayla
+  yükler, her biri bitince linkini gönderir
+- **Kanal doğrulama** — Studio, kanalın kimliğiyle (`/channel/UC…`) açılır ve aktif kanal
+  adı dosya verilmeden ve yayınlanmadan önce denetlenir; tutmazsa yükleme yapılmaz
+- `/giris` — Google oturumu düşünce Telegram'dan uzaktan giriş (yalnızca sunucuda)
+- `/yedek` — veritabanı yedeği (her gece otomatik); yedek dosyasını bota göndererek geri yükleme
+- `/temizle` — yüklenmiş klasörleri Drive çöp kutusuna taşır
 - Görsel + audio → ffmpeg ile 1920×1080 H.264/AAC mp4 (letterbox, oran korunur)
 - Playwright ile Studio yüklemesi: başlık/açıklama, sabit thumbnail, "çocuklara özel
   değil", telif kontrolü beklemesi, **Herkese Açık** yayın, video linki
@@ -22,7 +31,8 @@ lokal çalışır.
   yükleme adımı tekrarlanır
 - `/istatistik` — haftalık/aylık/toplam rapor, kanal kırılımı, son 10 yükleme
 - `/gorseller` — görsel kütüphanesi (listele/sil); akış içinde telefondan görsel ekleme
-- `/kanallar` — Studio'daki görünen kanal adlarının kaydı (kanal değiştirme buna göre yapılır)
+- `/kanallar` — kanalların kaydı; **Kanalları otomatik bul** hesaptaki kanalları adları
+  ve kimlikleriyle YouTube'dan okur
 - **Zamanlanmış Tarama ve Bildirim** — Her gün sabah 09:00, öğlen 14:00 ve akşam 18:00 saatlerinde Drive klasörünü otomatik tarar; hiçbir kanala yüklenmemiş (yükleme sayısı 0 olan) aktif klasörler varsa, yetkili kullanıcılara "bekleyen yüklemeler var" bildirimi gönderir.
 - Whitelist güvenliği: izinsiz kullanıcıya **hiç cevap verilmez**; deneme olursa size
   bildirim gelir (aynı ID için saatte en fazla 1)
@@ -189,10 +199,21 @@ Depodaki `Dockerfile` + `docker-compose.yml` botu sanal ekranlı (Xvfb) bir kaps
    bir alan adı bağlayıp dağıtın → `https://ALAN-ADI/vnc.html` adresinden parolayla
    bağlanın → açık duran tarayıcıda Google'a giriş yapıp Studio'yu görün.
 4. Girişten sonra `LOGIN_MODE=false` ve `ENABLE_VNC=false` yapıp yeniden dağıtın;
-   bot başlar. Oturum düşerse 3. adımı tekrarlayın.
+   bot başlar.
+5. **Sonraki girişler Telegram'dan:** alan adını silmeyin ve Environment'a
+   `VNC_URL=https://ALAN-ADI/vnc.html` ekleyin. Oturum düşerse `/giris` yazmak yeterli:
+   bot ekranı 15 dakikalığına açar, bağlantıyı ve tek kullanımlık parolayı gönderir,
+   sonra kapatır. Ekran yalnızca bu süre boyunca yayınlanır.
 
-`/restart` kapsayıcı içinde botu yeniden başlatır. `/guncelle` kapsayıcıda `git pull`
-yapamaz; güncelleme için Dokploy'dan yeniden dağıtın.
+`/restart` kapsayıcı içinde botu yeniden başlatır. Güncelleme otomatiktir: GitHub'a
+gönderim Dokploy'da yeniden dağıtımı tetikler (`/guncelle` kapsayıcıda bunu hatırlatır).
+
+### Yedek ve geri yükleme
+
+Yükleme geçmişi yalnızca `data/bot.db` içindedir. Bot her gece 03:00'te bu dosyanın
+yedeğini ilk yetkili kullanıcıya Telegram'dan gönderir; `/yedek` ile istediğiniz an
+alabilirsiniz. Geri yüklemek için yedek dosyasını (`.db`) bota belge olarak gönderip
+onaylayın. Görseller yedeğe dahil değildir.
 
 ---
 

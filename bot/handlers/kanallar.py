@@ -6,14 +6,20 @@ Studio'daki kanal adıyla birebir aynı olmalıdır.
 
 from __future__ import annotations
 
+import logging
+
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
+from ..config import get_config
 from ..services import db
+from ..services.studio_uploader import UPLOAD_LOCK, SessionExpiredError, StudioUploader
 from ..states import ChannelFlow
-from .common import esc
+from .common import esc, is_busy
+
+logger = logging.getLogger(__name__)
 
 router = Router(name="kanallar")
 
@@ -44,7 +50,8 @@ def _channels_view() -> tuple[str, InlineKeyboardMarkup]:
                                  callback_data=f"chpre:{c['id']}"),
             InlineKeyboardButton(text="🗑 Sil", callback_data=f"chdel:{c['id']}"),
         ])
-    rows.append([InlineKeyboardButton(text="➕ Kanal ekle", callback_data="chadd")])
+    rows.append([InlineKeyboardButton(text="🔎 Kanalları otomatik bul", callback_data="chdetect")])
+    rows.append([InlineKeyboardButton(text="➕ Elle kanal ekle", callback_data="chadd")])
     return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -52,6 +59,37 @@ def _channels_view() -> tuple[str, InlineKeyboardMarkup]:
 async def cmd_kanallar(message: Message) -> None:
     text, keyboard = _channels_view()
     await message.answer(text, reply_markup=keyboard)
+
+
+@router.callback_query(F.data == "chdetect")
+async def cb_detect_channels(callback: CallbackQuery) -> None:
+    """Hesaptaki kanalları YouTube'dan okur, adlarını ve kimliklerini kaydeder."""
+    if is_busy():
+        await callback.answer("Bir yükleme sürüyor; bitince tekrar deneyin.", show_alert=True)
+        return
+    await callback.answer()
+    status = await callback.message.answer("🔎 Hesaptaki kanallar YouTube'dan okunuyor...")
+    try:
+        async with UPLOAD_LOCK:  # tarayıcı profili aynı anda tek işte kullanılabilir
+            found = await StudioUploader(get_config()).detect_channels()
+    except SessionExpiredError as exc:
+        await status.edit_text(f"🔑 {esc(str(exc))}")
+        return
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Kanallar otomatik bulunamadı.")
+        await status.edit_text(f"❌ Kanallar okunamadı: {esc(str(exc))}")
+        return
+
+    if not found:
+        await status.edit_text("⚠️ Hesapta doğrulanabilen kanal bulunamadı.")
+        return
+    lines = []
+    for channel in found:
+        is_new = db.upsert_channel(channel["name"], channel["ucid"])
+        lines.append(f"{'➕' if is_new else '✔️'} {esc(channel['name'])}")
+    await status.edit_text("✅ Kanallar doğrulandı ve kaydedildi:\n" + "\n".join(lines))
+    text, keyboard = _channels_view()
+    await callback.message.answer(text, reply_markup=keyboard)
 
 
 @router.callback_query(F.data == "chadd")

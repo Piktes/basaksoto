@@ -7,7 +7,18 @@ from datetime import datetime
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from ..services.studio_uploader import UPLOAD_LOCK
+
 CANCEL_CB = "flow:cancel"
+
+# Toplu yükleme sırası: "active" sürerken yeni iş başlatılmaz; "stop" istenirse
+# sıradaki klasöre geçilmeden durulur.
+BATCH: dict[str, bool] = {"active": False, "stop": False}
+
+
+def is_busy() -> bool:
+    """Tarayıcı şu an bir işte mi (yükleme, toplu sıra, uzaktan giriş, kanal okuma)?"""
+    return UPLOAD_LOCK.locked() or BATCH["active"]
 
 
 def esc(text: str) -> str:

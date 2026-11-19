@@ -32,8 +32,10 @@ _BOT_COMMANDS = [
     BotCommand(command="baslat", description="Drive'ı tara, video yükle"),
     BotCommand(command="istatistik", description="Yükleme raporları"),
     BotCommand(command="gorseller", description="Görsel kütüphanesi"),
-    BotCommand(command="kanallar", description="Kanal adlarını yönet"),
-    BotCommand(command="guncelle", description="Botu güncelle ve yeniden başlat"),
+    BotCommand(command="kanallar", description="Kanalları yönet / otomatik bul"),
+    BotCommand(command="giris", description="Google oturumunu uzaktan yenile"),
+    BotCommand(command="yedek", description="Veritabanı yedeğini gönder"),
+    BotCommand(command="temizle", description="Yüklenmiş klasörleri çöpe taşı"),
     BotCommand(command="durdur", description="Botu geçici olarak durdur"),
     BotCommand(command="restart", description="Botu aktifleştir ve yeniden başlat"),
     BotCommand(command="yardim", description="Yardım"),
@@ -106,7 +108,7 @@ async def run_bot(config: Config) -> None:
     
     for user_id in config.allowed_user_ids:
         try:
-            await bot.send_message(user_id, "🤖 **Bot aktif ve hazır!**")
+            await bot.send_message(user_id, "🤖 <b>Bot aktif ve hazır!</b>")
         except Exception:
             pass
     try:

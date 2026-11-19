@@ -77,17 +77,74 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Eski veritabanlarına sonradan eklenen sütunları ekler (idempotent)."""
+    channel_cols = {r["name"] for r in conn.execute("PRAGMA table_info(channels)")}
+    if "ucid" not in channel_cols:
+        # YouTube kanal kimliği (UC...): Studio bu kimlikle doğrudan açılır.
+        conn.execute("ALTER TABLE channels ADD COLUMN ucid TEXT")
+
+
 def init_db(path: Path) -> None:
     """Veritabanını açar ve şemayı (idempotent) kurar."""
     global _db_path
     _db_path = path
     with closing(_connect()) as conn, conn:
         conn.executescript(_SCHEMA)
+        _migrate(conn)
         # Varsayılan etiketleri ekle
         default_tags = ["Ertugrul Gulec besteleri", "Ertugrul Gulec songs", "Ertugrul Gulec"]
         for tag in default_tags:
             conn.execute("INSERT OR IGNORE INTO tags (name, is_default) VALUES (?, 1)", (tag,))
     logger.info("SQLite hazır: %s", path)
+
+
+# ---------------------------------------------------------------- yedek
+
+_REQUIRED_TABLES = {"folders", "channels", "uploads", "settings"}
+
+
+def backup_to(dest: Path) -> None:
+    """Canlı veritabanının tutarlı bir kopyasını ``dest`` dosyasına yazar."""
+    with closing(_connect()) as src, closing(sqlite3.connect(dest)) as dst:
+        src.backup(dst)
+
+
+def inspect_backup(path: Path) -> dict[str, int]:
+    """Yedek dosyasını doğrular ve özet sayıları döndürür.
+
+    Raises:
+        ValueError: Dosya geçerli bir bot veritabanı değilse.
+    """
+    try:
+        with closing(sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)) as conn:
+            check = conn.execute("PRAGMA integrity_check").fetchone()[0]
+            if check != "ok":
+                raise ValueError("Dosya bozuk (bütünlük denetimi başarısız).")
+            tables = {r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+            missing = _REQUIRED_TABLES - tables
+            if missing:
+                raise ValueError("Bu dosya bot yedeği değil (eksik tablo: "
+                                 f"{', '.join(sorted(missing))}).")
+            return {
+                "folders": conn.execute("SELECT COUNT(*) FROM folders").fetchone()[0],
+                "uploads": conn.execute("SELECT COUNT(*) FROM uploads").fetchone()[0],
+                "channels": conn.execute("SELECT COUNT(*) FROM channels").fetchone()[0],
+            }
+    except sqlite3.DatabaseError as exc:
+        raise ValueError(f"Dosya bir SQLite veritabanı değil: {exc}") from exc
+
+
+def restore_from(path: Path) -> None:
+    """Canlı veritabanının içeriğini yedek dosyasıyla değiştirir (şema güncel tutulur)."""
+    inspect_backup(path)
+    with closing(sqlite3.connect(path)) as src, closing(_connect()) as dst:
+        src.backup(dst)
+    with closing(_connect()) as conn, conn:
+        conn.executescript(_SCHEMA)
+        _migrate(conn)
+    logger.info("Veritabanı yedekten geri yüklendi: %s", path)
 
 
 # ---------------------------------------------------------------- folders
@@ -227,6 +284,29 @@ def add_channel(display_name: str) -> bool:
         return True
     except sqlite3.IntegrityError:
         return False
+
+
+def upsert_channel(display_name: str, ucid: str) -> bool:
+    """Kanalı kimliğiyle kaydeder; yeni eklendiyse True, var olan güncellendiyse False."""
+    with closing(_connect()) as conn, conn:
+        cur = conn.execute("UPDATE channels SET ucid = ? WHERE display_name = ?", (ucid, display_name))
+        if cur.rowcount:
+            return False
+        conn.execute("INSERT INTO channels (display_name, ucid) VALUES (?, ?)", (display_name, ucid))
+        return True
+
+
+def get_channel_ucid(display_name: str) -> str | None:
+    with closing(_connect()) as conn:
+        row = conn.execute(
+            "SELECT ucid FROM channels WHERE display_name = ?", (display_name,)
+        ).fetchone()
+        return row["ucid"] if row and row["ucid"] else None
+
+
+def set_channel_ucid(display_name: str, ucid: str) -> None:
+    with closing(_connect()) as conn, conn:
+        conn.execute("UPDATE channels SET ucid = ? WHERE display_name = ?", (ucid, display_name))
 
 
 def get_channel(channel_id: int) -> sqlite3.Row | None:

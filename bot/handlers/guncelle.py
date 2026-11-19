@@ -1,14 +1,22 @@
-"""/guncelle komutu: GitHub'dan en son sürümü çeker ve botu yeniden başlatır."""
+"""/guncelle komutu.
+
+Sunucuda (Docker/Dokploy) güncelleme GitHub'a gönderimle otomatik yapılır;
+kapsayıcı içinde ``git pull`` çalışmaz. Depo klasöründen çalışan kurulumlarda
+(Windows / systemd) eski davranış sürer: ``git pull`` + yeniden başlatma.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import sys
 import subprocess
+import sys
+
 from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import Message
+
+from ..config import PROJECT_ROOT
 
 logger = logging.getLogger(__name__)
 router = Router(name="guncelle")
@@ -16,14 +24,21 @@ router = Router(name="guncelle")
 
 @router.message(Command("guncelle"))
 async def cmd_guncelle(message: Message) -> None:
-    await message.answer("📥 Güncellemeler GitHub'dan çekiliyor...")
+    if not (PROJECT_ROOT / ".git").exists():
+        await message.answer(
+            "ℹ️ Bu kurulumda güncelleme otomatiktir: GitHub'a yeni sürüm gönderildiğinde "
+            "sunucu kendiliğinden yeniden dağıtılır. Elle tetiklemek için Dokploy panelinde "
+            "<b>Deploy</b>'a basın."
+        )
+        return
 
+    await message.answer("📥 Güncellemeler GitHub'dan çekiliyor...")
     try:
-        # git pull komutunu asenkron olarak çalıştır
         process = await asyncio.create_subprocess_exec(
             "git", "pull",
+            cwd=str(PROJECT_ROOT),
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
+            stderr=subprocess.PIPE,
         )
         stdout, stderr = await process.communicate()
 
@@ -40,8 +55,8 @@ async def cmd_guncelle(message: Message) -> None:
                 f"🔄 Güncelleme tamamlandı:\n<code>{out_msg}</code>\n\n"
                 "Bot şimdi yeniden başlatılıyor..."
             )
-        
-        # systemd servisi (Restart=always) botu otomatik ayağa kaldıracaktır
+
+        # Servis yöneticisi (systemd Restart=always) botu yeniden ayağa kaldırır.
         sys.exit(1)
 
     except Exception as exc:

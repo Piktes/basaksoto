@@ -7,6 +7,9 @@ class UploadFlow(StatesGroup):
     """/baslat onay akışının adımları."""
 
     choosing_folder = State()
+    searching_folder = State()
+    batch_channels = State()
+    batch_confirm = State()
     choosing_channel = State()
     confirming_channel_image = State()
     choosing_image_source = State()

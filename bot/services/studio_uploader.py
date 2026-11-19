@@ -16,7 +16,7 @@ import logging
 import random
 import re
 from pathlib import Path
-from typing import Awaitable, Callable
+from typing import Any, Awaitable, Callable
 
 from playwright.async_api import (
     BrowserContext,
@@ -26,6 +26,7 @@ from playwright.async_api import (
 )
 
 from ..config import Config, get_config
+from . import db
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +58,8 @@ SELECTORS: dict[str, str] = {
     # youtube.com/channel_switcher — kanal kartları
     "switcher_item": "ytd-account-item-renderer",
     "switcher_item_name": "#channel-title",
+    # Studio sol menüsü — aktif kanalın adı
+    "active_channel": "ytcp-navigation-drawer #entity-name, #entity-name",
     # Yükleme diyaloğu
     "upload_dialog": "ytcp-uploads-dialog",
     "file_input": "ytcp-uploads-dialog input[type=file], input[type=file]",
@@ -119,8 +122,94 @@ async def _human_pause(low: float = 0.5, high: float = 1.5) -> None:
     await asyncio.sleep(random.uniform(low, high))
 
 
+_UCID_RE = re.compile(r"UC[\w-]{22}")
+_UCID_JSON_RE = re.compile(r'"(?:channelId|externalId)":"(UC[\w-]{22})"')
+
+
 def _norm(text: str) -> str:
     return re.sub(r"\s+", " ", text or "").strip().casefold()
+
+
+def _studio_channel_url(ucid: str) -> str:
+    return f"{STUDIO_URL}channel/{ucid}"
+
+
+def _clear_profile_locks(cfg: Config) -> None:
+    """Chromium çökmesinden kalan profil kilitlerini temizler (SingletonLock vb.)."""
+    for lock_name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+        lock_file = cfg.browser_profile_dir / lock_name
+        if lock_file.exists() or lock_file.is_symlink():
+            try:
+                lock_file.unlink()
+            except OSError as exc:
+                logger.warning("Kilit dosyası %s silinemedi: %s", lock_name, exc)
+
+
+def _launch_kwargs(cfg: Config) -> dict:
+    kwargs: dict = {
+        "user_data_dir": str(cfg.browser_profile_dir),
+        "headless": cfg.headless,
+        "viewport": {"width": 1440, "height": 900},
+        "args": ["--disable-blink-features=AutomationControlled"],
+    }
+    if cfg.headless:
+        kwargs["user_agent"] = HEADLESS_USER_AGENT
+    return kwargs
+
+
+def _is_login_url(url: str) -> bool:
+    return "accounts.google.com" in url or "/signin" in url
+
+
+async def _read_switcher(page: Page) -> list[dict[str, str]]:
+    """youtube.com/channel_switcher sayfasındaki kanalları okur: görünen ad + @tanıtıcı."""
+    # Studio'nun kendi yönlendirmesi sürerken yapılan geçiş geri alınabiliyor;
+    # adres gerçekten kanal seçiciye gelene kadar yeniden denenir.
+    for _ in range(3):
+        await page.goto(CHANNEL_SWITCHER_URL, wait_until="domcontentloaded")
+        await asyncio.sleep(1.0)
+        if "channel_switcher" in page.url or _is_login_url(page.url):
+            break
+    if _is_login_url(page.url):
+        raise SessionExpiredError("Google oturumu düşmüş. /giris komutuyla yeniden giriş yapın.")
+    items = page.locator(SELECTORS["switcher_item"])
+    try:
+        await items.first.wait_for(state="visible", timeout=30_000)
+    except PlaywrightTimeoutError as exc:
+        if _is_login_url(page.url):
+            raise SessionExpiredError(
+                "Google oturumu düşmüş. /giris komutuyla yeniden giriş yapın.") from exc
+        raise StudioUploadError(
+            "kanal listesi", "Kanal seçim sayfası (youtube.com/channel_switcher) yüklenemedi."
+        ) from exc
+    await _human_pause(1.5, 2.5)  # kart verilerinin bağlanması için
+
+    entries: list[dict[str, str]] = []
+    for i in range(await items.count()):
+        item = items.nth(i)
+        name = (await item.locator(SELECTORS["switcher_item_name"]).first.inner_text()).strip()
+        handle = await item.evaluate(
+            "e => (e.data && e.data.channelHandle && e.data.channelHandle.simpleText) || ''"
+        )
+        if name:
+            entries.append({"name": name, "handle": (handle or "").strip()})
+    return entries
+
+
+async def _resolve_handle(page: Page, handle: str) -> str | None:
+    """@tanıtıcıdan kanal kimliğini (UC...) bulur; bulunamazsa None."""
+    if not handle.startswith("@"):
+        return None
+    await page.goto(f"https://www.youtube.com/{handle}", wait_until="domcontentloaded")
+    try:
+        href = await page.locator('link[rel="canonical"]').first.get_attribute("href", timeout=10_000)
+    except Exception:  # noqa: BLE001
+        href = None
+    match = _UCID_RE.search(href or "")
+    if match is not None:
+        return match.group(0)
+    match = _UCID_JSON_RE.search(await page.content())
+    return match.group(1) if match else None
 
 
 class StudioUploader:
@@ -201,6 +290,7 @@ class StudioUploader:
                 await self._handle_identity_check(page)
 
                 step = "video dosyasını verme"
+                await self._assert_channel(page, channel_name, "video dosyasını verme")
                 await page.locator(SELECTORS["file_input"]).first.set_input_files(str(video_path))
                 logger.info("Video dosyası verildi: %s", video_path.name)
                 await self._handle_identity_check(page)
@@ -234,6 +324,7 @@ class StudioUploader:
                 video_url = await self._read_video_link(page)
 
                 step = "yayınlama"
+                await self._assert_channel(page, channel_name, "yayınlama")
                 await page.locator(SELECTORS["done_button"]).first.click()
                 video_url = await self._confirm_published(page, video_url)
 
@@ -262,8 +353,7 @@ class StudioUploader:
             pass  # networkidle gelmese de URL kontrolü yeterli
         if "accounts.google.com" in page.url or "/signin" in page.url:
             raise SessionExpiredError(
-                "Google oturumu düşmüş. Bilgisayarda 'python -m bot --login-setup' "
-                "çalıştırıp yeniden giriş yapın."
+                "Google oturumu düşmüş. /giris komutuyla yeniden giriş yapın."
             )
         await self._dismiss_browser_warning(page)
         # Check identity verification during startup session check too
@@ -434,78 +524,138 @@ class StudioUploader:
             except PlaywrightTimeoutError:
                 continue
 
-    async def _current_channel_name(self, page: Page) -> str | None:
-        """Studio avatar menüsünden aktif kanal adını okur (okuyamazsa None)."""
-        try:
-            await page.locator(SELECTORS["account_button"]).first.click(timeout=15_000)
-            name_loc = page.locator(SELECTORS["account_name"]).first
-            await name_loc.wait_for(state="visible", timeout=10_000)
-            name = _norm(await name_loc.inner_text())
-            await page.keyboard.press("Escape")
-            await _human_pause(0.3, 0.7)
-            return name
-        except PlaywrightTimeoutError:
-            logger.warning("Aktif kanal adı okunamadı; kanal değiştirici kullanılacak.")
+    async def _active_channel(self, page: Page, timeout_ms: int = 30_000) -> str | None:
+        """Studio'nun sol menüsünde yazan aktif kanal adını okur (okuyamazsa None).
+
+        Yükleme diyaloğu açıkken de çalışır: öğe görünür olmasa da DOM'dadır.
+        """
+        loc = page.locator(SELECTORS["active_channel"]).first
+        deadline = asyncio.get_running_loop().time() + timeout_ms / 1000
+        while True:
             try:
-                await page.keyboard.press("Escape")
-            except Exception:  # noqa: BLE001
-                pass
-            return None
+                text = (await loc.text_content(timeout=2_000) or "").strip()
+            except Exception:  # noqa: BLE001 — öğe henüz yok
+                text = ""
+            if text:
+                return text
+            if asyncio.get_running_loop().time() >= deadline:
+                logger.warning("Aktif kanal adı okunamadı.")
+                return None
+            await asyncio.sleep(0.5)
 
     async def _ensure_channel(self, context: BrowserContext, page: Page, channel_name: str) -> None:
-        """Doğru kanalda değilsek youtube.com/channel_switcher ile kanala geçer."""
-        current = await self._current_channel_name(page)
+        """Hedef kanalın Studio'sunu kanal kimliğiyle açar ve doğru kanalda olduğunu doğrular.
+
+        youtube.com/channel_switcher üzerinden kanal değiştirmek güvenilir değil:
+        tıklama kabul edilse de Studio aynı oturumda eski kanalı göstermeye devam
+        ediyor. Studio'yu ``/channel/<kimlik>`` adresiyle açmak ise kanalı anında
+        ve kesin olarak seçiyor. Kanal doğrulanamazsa yükleme BAŞLAMAZ.
+        """
         wanted = _norm(channel_name)
-        if current == wanted:
-            logger.info("Zaten doğru kanaldayız: %s", channel_name)
-            return
-
-        logger.info("Kanal değiştiriliyor: %r → %r", current, channel_name)
-        await page.goto(CHANNEL_SWITCHER_URL, wait_until="domcontentloaded")
-        items = page.locator(SELECTORS["switcher_item"])
+        # Studio kök adresten /channel/<kimlik>'e kendi yönlendirmesini bitirsin;
+        # yoksa aşağıdaki geçişi geri alabiliyor.
         try:
-            await items.first.wait_for(state="visible", timeout=30_000)
-        except PlaywrightTimeoutError as exc:
-            raise StudioUploadError(
-                "kanal değiştirme",
-                "Kanal seçim sayfası (youtube.com/channel_switcher) yüklenemedi.",
-                await self._safe_screenshot(page),
-            ) from exc
+            await page.wait_for_url("**/channel/**", timeout=15_000)
+        except PlaywrightTimeoutError:
+            pass
 
-        # JS click handler'larının yüklenip elementlere bağlanması için kısa süre bekle
-        await _human_pause(1.5, 2.5)
+        ucid = db.get_channel_ucid(channel_name)
+        if not ucid:
+            ucid = await self._discover_ucid(page, channel_name)
+            db.set_channel_ucid(channel_name, ucid)
+        self._ucid = ucid
 
-        count = await items.count()
-        names: list[str] = []
-        for i in range(count):
-            item = items.nth(i)
-            raw = await item.locator(SELECTORS["switcher_item_name"]).first.inner_text()
-            names.append(raw.strip())
-            if _norm(raw) == wanted:
-                clickable = item.locator("tp-yt-paper-icon-item, #channel-title").first
-                await clickable.click()
-                
-                # Kanal geçiş yönlendirmesinin başladığını doğrula (yönlenmezse tekrar tıkla)
-                try:
-                    await page.wait_for_url(lambda url: "channel_switcher" not in url, timeout=5_000)
-                except PlaywrightTimeoutError:
-                    logger.warning("Kanal geçişi tetiklenmedi, tekrar tıklanıyor...")
-                    await clickable.click()
-                    await page.wait_for_url(lambda url: "channel_switcher" not in url, timeout=15_000)
-
-                await page.wait_for_load_state("domcontentloaded")
-                await _human_pause(1.0, 2.0)
-                await page.goto(STUDIO_URL, wait_until="domcontentloaded")
-                await self._dismiss_browser_warning(page)
+        active: str | None = None
+        for _ in range(3):
+            await page.goto(_studio_channel_url(ucid), wait_until="domcontentloaded")
+            await self._dismiss_browser_warning(page)
+            await asyncio.sleep(1.0)
+            if f"/channel/{ucid}" not in page.url:
+                continue  # başka bir yönlendirme araya girdiyse yeniden dene
+            active = await self._active_channel(page)
+            if _norm(active or "") == wanted:
+                logger.info("Kanal doğrulandı: %s (%s)", channel_name, ucid)
                 await _human_pause()
                 return
 
         raise StudioUploadError(
-            "kanal değiştirme",
-            f"'{channel_name}' adlı kanal bulunamadı. Hesaptaki kanallar: {', '.join(names) or '—'}. "
-            "/kanallar komutuyla kayıtlı adın Studio'daki görünen adla birebir aynı olduğundan emin olun.",
+            "kanal doğrulama",
+            f"Studio '{active or 'okunamadı'}' kanalını gösteriyor; beklenen '{channel_name}'. "
+            "Yükleme başlatılmadı. /kanallar → 'Kanalları otomatik bul' ile kanal kaydını yenileyin.",
             await self._safe_screenshot(page),
         )
+
+    async def _assert_channel(self, page: Page, channel_name: str, step: str) -> None:
+        """Kritik adımlardan hemen önce hâlâ doğru kanalda olduğumuzu denetler."""
+        active = await self._active_channel(page, timeout_ms=10_000)
+        if active is not None:
+            ok = _norm(active) == _norm(channel_name)
+        else:
+            ucid = getattr(self, "_ucid", None)
+            ok = bool(ucid) and f"/channel/{ucid}" in page.url
+        if not ok:
+            raise StudioUploadError(
+                "kanal doğrulama",
+                f"'{step}' öncesinde kanal doğrulanamadı: Studio '{active or 'okunamadı'}' "
+                f"gösteriyor, beklenen '{channel_name}'. İşlem durduruldu.",
+                await self._safe_screenshot(page),
+            )
+
+    async def _discover_ucid(self, page: Page, channel_name: str) -> str:
+        """Kanal kimliği kayıtlı değilse hesaptaki kanallardan ada göre bulur."""
+        entries = await _read_switcher(page)
+        wanted = _norm(channel_name)
+        entry = next((e for e in entries if _norm(e["name"]) == wanted), None)
+        if entry is None:
+            names = ", ".join(e["name"] for e in entries) or "—"
+            raise StudioUploadError(
+                "kanal bulma",
+                f"'{channel_name}' adlı kanal bulunamadı. Hesaptaki kanallar: {names}. "
+                "/kanallar → 'Kanalları otomatik bul' ile kanalları yeniden kaydedin.",
+                await self._safe_screenshot(page),
+            )
+        ucid = await _resolve_handle(page, entry["handle"]) if entry["handle"] else None
+        if not ucid:
+            raise StudioUploadError(
+                "kanal bulma",
+                f"'{channel_name}' kanalının kimliği okunamadı.",
+                await self._safe_screenshot(page),
+            )
+        return ucid
+
+    async def detect_channels(self) -> list[dict[str, str]]:
+        """Hesaptaki kanalları bulur: ad + kanal kimliği, Studio'da doğrulanmış olarak.
+
+        Returns:
+            ``{"name", "ucid"}`` sözlükleri (yalnızca Studio'da adı doğrulananlar).
+
+        Raises:
+            SessionExpiredError: Google oturumu düşmüşse.
+        """
+        _clear_profile_locks(self._cfg)
+        async with async_playwright() as pw:
+            context = await pw.chromium.launch_persistent_context(**_launch_kwargs(self._cfg))
+            page = context.pages[0] if context.pages else await context.new_page()
+            page.set_default_timeout(60_000)
+            try:
+                found: list[dict[str, str]] = []
+                for entry in await _read_switcher(page):
+                    if not entry["handle"]:
+                        continue
+                    ucid = await _resolve_handle(page, entry["handle"])
+                    if not ucid:
+                        continue
+                    await page.goto(_studio_channel_url(ucid), wait_until="domcontentloaded")
+                    await self._dismiss_browser_warning(page)
+                    active = await self._active_channel(page)
+                    if _norm(active or "") == _norm(entry["name"]):
+                        found.append({"name": entry["name"], "ucid": ucid})
+                    else:
+                        logger.warning("Kanal doğrulanamadı: %r → Studio %r gösterdi.",
+                                       entry["name"], active)
+                return found
+            finally:
+                await context.close()
 
     async def _open_upload_dialog(self, page: Page) -> None:
         """Oluştur → Video yükle (buton rol+isimle, menü metni TR/EN denenir)."""

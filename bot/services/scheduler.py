@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from aiogram import Bot
 
 from ..config import Config
-from . import db, drive
+from . import backup, db, drive
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +89,36 @@ async def scheduler_loop(bot: Bot, config: Config) -> None:
             logger.exception("Zamanlayıcı döngüsünde beklenmeyen hata. 60 saniye sonra tekrar denenecek...")
             await asyncio.sleep(60)
 
+BACKUP_HOUR = 3  # her gece 03:00'te veritabanı yedeği gönderilir
+
+
+def seconds_until_hour(now: datetime, hour: int) -> float:
+    """Bir sonraki ``hour:00``'a kalan saniye."""
+    target = now.replace(hour=hour, minute=0, second=0, microsecond=0)
+    if target <= now:
+        target += timedelta(days=1)
+    return (target - now).total_seconds()
+
+
+async def backup_loop(bot: Bot, config: Config) -> None:
+    """Her gece veritabanı yedeğini ilk yetkili kullanıcıya Telegram'dan gönderir."""
+    while True:
+        try:
+            await asyncio.sleep(seconds_until_hour(datetime.now(), BACKUP_HOUR))
+            await backup.send_backup(bot, config.primary_admin_id, config, note=" (gecelik)")
+            logger.info("Gecelik veritabanı yedeği gönderildi.")
+            await asyncio.sleep(5)
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            logger.exception("Gecelik yedek gönderilemedi. 1 saat sonra yeniden denenecek...")
+            await asyncio.sleep(3600)
+
+
+async def _run_all(bot: Bot, config: Config) -> None:
+    await asyncio.gather(scheduler_loop(bot, config), backup_loop(bot, config))
+
+
 def start_scheduler(bot: Bot, config: Config) -> asyncio.Task:
-    """Zamanlayıcıyı arka plan görevi olarak başlatır."""
-    return asyncio.create_task(scheduler_loop(bot, config))
+    """Zamanlayıcıları (Drive taraması + gecelik yedek) arka plan görevi olarak başlatır."""
+    return asyncio.create_task(_run_all(bot, config))

@@ -3,7 +3,8 @@
 # Ortam değişkenleri Dokploy'un "Environment" sekmesine yazılır (.env olarak gelir):
 #   TELEGRAM_BOT_TOKEN, ALLOWED_USER_IDS, DRIVE_ROOT_FOLDER_ID   zorunlu
 #   GOOGLE_CLIENT_SECRET_B64, GOOGLE_TOKEN_B64                   Drive kimlikleri (base64)
-#   ENABLE_VNC, VNC_PASSWORD, LOGIN_MODE                         yalnızca Google girişi için
+#   VNC_URL                                                      /giris komutunun göndereceği adres
+#   ENABLE_VNC, VNC_PASSWORD, LOGIN_MODE                         yalnızca ilk Google girişi için
 #
 # Kalıcı veriler (veritabanı, görseller, Google oturumu, Drive token'ı) volume'lerde
 # durur; yeniden dağıtımda silinmez.
@@ -17,7 +18,7 @@ services:
       TZ: Europe/Istanbul
     shm_size: "1gb"
     stop_grace_period: 30s
-    # noVNC (yalnızca ENABLE_VNC=true iken dinlenir). Host'a port açılmaz: Dokploy'un
+    # noVNC (yalnızca /giris oturumunda ya da ENABLE_VNC=true iken dinlenir). Host'a port açılmaz: Dokploy'un
     # "Domains" sekmesinden bu servise, 6080 portuna bir alan adı bağlanır (HTTPS).
     expose:
       - "6080"

@@ -41,7 +41,7 @@ from ..services.studio_uploader import (
 )
 from ..services.video import VideoError
 from ..states import UploadFlow
-from .common import CANCEL_CB, cancel_button, cancel_keyboard, esc, fmt_date
+from .common import BATCH, CANCEL_CB, cancel_button, cancel_keyboard, esc, fmt_date, is_busy
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +53,10 @@ _PREVIEW_LIMIT = 3000  # Telegram mesajında gösterilecek azami açıklama uzun
 _SAVED_IMAGES_LIMIT = 10
 
 LAST_SCAN_KEY = "last_scan_at"
+
+PAGE_SIZE = 8  # klasör listesinde sayfa başına düğme
+FILTER_PENDING = "pending"
+FILTER_ALL = "all"
 
 
 @dataclass
@@ -111,15 +115,125 @@ def _cleanup_job_files(job: UploadJob) -> None:
 
 # ================================================================ /baslat
 
+def _fold(text: str) -> str:
+    """Türkçe harflere duyarlı küçük harfe çevirme (arama için)."""
+    return (text or "").replace("İ", "i").replace("I", "ı").lower()
+
+
+def _is_complete(uploaded: set[str], channels: list[str]) -> bool:
+    """Klasör kayıtlı tüm kanallara yüklendi mi? (Kanal yoksa: hiç yükleme var mı?)"""
+    if channels:
+        return all(c in uploaded for c in channels)
+    return bool(uploaded)
+
+
+def _filtered_folders(filter_: str, query: str) -> tuple[list[Any], list[str], dict[str, list[str]], int, int]:
+    """Süzülmüş klasörler + kanal adları + yükleme haritası + toplam + bekleyen sayısı."""
+    folders = db.get_active_folders()
+    channels = db.get_all_channel_names()
+    uploads = db.get_all_folder_uploads()
+    needle = _fold(query)
+    visible = []
+    pending_total = 0
+    for f in folders:
+        done = _is_complete(set(uploads.get(f["folder_id"], [])), channels)
+        if not done:
+            pending_total += 1
+        if filter_ == FILTER_PENDING and done:
+            continue
+        if needle and needle not in _fold(f["folder_name"]):
+            continue
+        visible.append(f)
+    return visible, channels, uploads, len(folders), pending_total
+
+
+def _folder_label(folder: Any, channels: list[str], uploads: dict[str, list[str]],
+                  checked: bool | None = None) -> str:
+    uploaded = uploads.get(folder["folder_id"], [])
+    marks = "".join("✅" if c in uploaded else "▫️" for c in channels)
+    if checked is not None:
+        icon = "☑️" if checked else "⬜"
+    else:
+        icon = "⚠️" if folder["status"] == db.STATUS_ERROR else "📁"
+    return f"{icon} {folder['folder_name']}" + (f"  {marks}" if marks else "")
+
+
+def _folder_list_view(data: dict[str, Any]) -> tuple[str, InlineKeyboardMarkup]:
+    """Klasör listesi (sayfalı, süzgeçli, aramalı); tek tek ve toplu seçim modları."""
+    filter_ = data.get("fl_filter", FILTER_PENDING)
+    query = data.get("fl_query", "")
+    batch = bool(data.get("fl_batch"))
+    selected = set(data.get("bq_sel", []))
+    visible, channels, uploads, total, pending_total = _filtered_folders(filter_, query)
+
+    pages = max(1, -(-len(visible) // PAGE_SIZE))
+    page = min(max(int(data.get("fl_page", 0)), 0), pages - 1)
+
+    rows: list[list[InlineKeyboardButton]] = []
+    for f in visible[page * PAGE_SIZE:(page + 1) * PAGE_SIZE]:
+        fid = f["folder_id"]
+        if batch:
+            rows.append([InlineKeyboardButton(
+                text=_folder_label(f, channels, uploads, checked=fid in selected),
+                callback_data=f"bqt:{fid}")])
+        else:
+            rows.append([InlineKeyboardButton(
+                text=_folder_label(f, channels, uploads), callback_data=f"folder:{fid}")])
+
+    if pages > 1:
+        rows.append([
+            InlineKeyboardButton(text="◀️", callback_data=f"fl:p:{(page - 1) % pages}"),
+            InlineKeyboardButton(text=f"{page + 1} / {pages}", callback_data="fl:noop"),
+            InlineKeyboardButton(text="▶️", callback_data=f"fl:p:{(page + 1) % pages}"),
+        ])
+    rows.append([
+        InlineKeyboardButton(text="✖️ Aramayı temizle", callback_data="fl:x") if query
+        else InlineKeyboardButton(text="🔎 Ara", callback_data="fl:s"),
+        InlineKeyboardButton(
+            text="📋 Tümünü göster" if filter_ == FILTER_PENDING else "⏳ Yalnızca bekleyenler",
+            callback_data="fl:f"),
+    ])
+    if batch:
+        rows.append([
+            InlineKeyboardButton(text="☑️ Görünenlerin tümü", callback_data="bq:all"),
+            InlineKeyboardButton(text="⬜ Seçimi temizle", callback_data="bq:none"),
+        ])
+        rows.append([InlineKeyboardButton(
+            text=f"➡️ Devam ({len(selected)} klasör seçili)", callback_data="bq:next")])
+        rows.append([InlineKeyboardButton(text="↩️ Tek tek yüklemeye dön", callback_data="fl:single")])
+    else:
+        rows.append([InlineKeyboardButton(text="📦 Toplu yükle (sıraya al)", callback_data="fl:batch")])
+    rows.append([cancel_button()])
+
+    lines = ["📦 <b>Toplu yükleme — klasörleri işaretleyin</b>" if batch
+             else "📂 <b>Yüklenecek klasörü seçin</b>"]
+    lines.append(f"Bekleyen: <b>{pending_total}</b> · Drive'daki toplam: <b>{total}</b>")
+    lines.append("Görünüm: " + ("yalnızca bekleyenler" if filter_ == FILTER_PENDING else "tümü")
+                 + (f" · arama: “{esc(query)}”" if query else ""))
+    if channels:
+        lines.append("İşaretler sırasıyla: " + ", ".join(esc(c) for c in channels) + " (✅ yüklendi)")
+    if not visible:
+        lines.append("\n<i>Bu görünümde klasör yok.</i>")
+    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _refresh_list(callback: CallbackQuery, state: FSMContext) -> None:
+    text, keyboard = _folder_list_view(await state.get_data())
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard)
+    except Exception:  # noqa: BLE001 — "message is not modified" vb.
+        pass
+
+
 @router.message(Command("baslat"))
 async def cmd_baslat(message: Message, state: FSMContext) -> None:
     if db.get_setting("bot_status") == "paused":
         await message.answer(
-            "⚠️ **Bot şu anda durdurulmuş durumda.**\n"
-            "Yeni yükleme başlatmak için önce `/restart` yazarak bota start verin."
+            "⚠️ <b>Bot şu anda durdurulmuş durumda.</b>\n"
+            "Yeni yükleme başlatmak için önce /restart yazarak bota start verin."
         )
         return
-    if UPLOAD_LOCK.locked():
+    if is_busy():
         await message.answer(
             "⏳ Şu anda bir yükleme devam ediyor. Bitince tekrar /baslat yazabilirsiniz."
         )
@@ -139,55 +253,244 @@ async def cmd_baslat(message: Message, state: FSMContext) -> None:
         await _safe_edit(scan_msg, f"❌ Drive taranamadı: {esc(str(exc))}")
         return
 
-    new_folders = db.sync_folders(folders)
-    all_channels = db.get_all_channel_names()
-    all_uploads = db.get_all_folder_uploads()
-    rows = []
-    
-    for f in new_folders:
-        uploaded = all_uploads.get(f['folder_id'], [])
-            
-        status_parts = []
-        for chan in all_channels:
-            short_name = chan.split(" ")[0][:2].upper()
-            icon = "✅" if chan in uploaded else "❌"
-            status_parts.append(f"{short_name} {icon}")
-        status_str = " | ".join(status_parts) if status_parts else ""
-        
-        icon = '⚠️' if f['status'] == db.STATUS_ERROR else '📁'
-        if status_str:
-            text = f"[{status_str}] {icon} {f['folder_name']}"
-        else:
-            text = f"{icon} {f['folder_name']}"
-            
-        rows.append([
-            InlineKeyboardButton(text=text, callback_data=f"folder:{f['folder_id']}")
-        ])
-
+    active = db.sync_folders(folders)
     db.set_setting(LAST_SCAN_KEY, datetime.now().isoformat(timespec="seconds"))
 
-    if not rows:
-        last_scan = db.get_setting(LAST_SCAN_KEY)
+    if not active:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text="📜 Geçmişi göster", callback_data="history")
         ]])
-        await _safe_edit(scan_msg, "Yeni klasör yok.")
-        await scan_msg.edit_text(
-            f"Yeni veya tamamlanmamış klasör yok. Son tarama: {fmt_date(last_scan, '%d.%m.%Y %H:%M')}",
-            reply_markup=keyboard,
+        await scan_msg.edit_text("Drive'da yüklenebilir klasör yok.", reply_markup=keyboard)
+        return
+
+    await state.set_state(UploadFlow.choosing_folder)
+    await state.update_data(fl_filter=FILTER_PENDING, fl_query="", fl_page=0,
+                            fl_batch=False, bq_sel=[])
+    await _safe_edit(scan_msg, f"🔍 Tarama bitti — Drive'da {len(active)} şarkı klasörü var.")
+    text, keyboard = _folder_list_view(await state.get_data())
+    await scan_msg.answer(text, reply_markup=keyboard)
+
+
+@router.callback_query(UploadFlow.choosing_folder, F.data == "fl:noop")
+async def cb_list_noop(callback: CallbackQuery) -> None:
+    await callback.answer()
+
+
+@router.callback_query(UploadFlow.choosing_folder, F.data.startswith("fl:p:"))
+async def cb_list_page(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.update_data(fl_page=int(callback.data.split(":")[2]))
+    await callback.answer()
+    await _refresh_list(callback, state)
+
+
+@router.callback_query(UploadFlow.choosing_folder, F.data == "fl:f")
+async def cb_list_filter(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    new_filter = FILTER_ALL if data.get("fl_filter", FILTER_PENDING) == FILTER_PENDING else FILTER_PENDING
+    await state.update_data(fl_filter=new_filter, fl_page=0)
+    await callback.answer()
+    await _refresh_list(callback, state)
+
+
+@router.callback_query(UploadFlow.choosing_folder, F.data == "fl:x")
+async def cb_list_clear_search(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.update_data(fl_query="", fl_page=0)
+    await callback.answer("Arama temizlendi.")
+    await _refresh_list(callback, state)
+
+
+@router.callback_query(UploadFlow.choosing_folder, F.data == "fl:s")
+async def cb_list_search(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(UploadFlow.searching_folder)
+    await callback.message.answer(
+        "🔎 Klasör adında aranacak kelimeyi yazın:", reply_markup=cancel_keyboard()
+    )
+    await callback.answer()
+
+
+@router.message(UploadFlow.searching_folder, F.text)
+async def msg_list_search(message: Message, state: FSMContext) -> None:
+    await state.update_data(fl_query=message.text.strip()[:60], fl_page=0)
+    await state.set_state(UploadFlow.choosing_folder)
+    text, keyboard = _folder_list_view(await state.get_data())
+    await message.answer(text, reply_markup=keyboard)
+
+
+@router.callback_query(UploadFlow.choosing_folder, F.data.in_({"fl:batch", "fl:single"}))
+async def cb_list_mode(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.update_data(fl_batch=callback.data == "fl:batch", bq_sel=[])
+    await callback.answer()
+    await _refresh_list(callback, state)
+
+
+# ============================================================ toplu seçim
+
+@router.callback_query(UploadFlow.choosing_folder, F.data.startswith("bqt:"))
+async def cb_batch_toggle(callback: CallbackQuery, state: FSMContext) -> None:
+    folder_id = callback.data.split(":", 1)[1]
+    data = await state.get_data()
+    selected = list(data.get("bq_sel", []))
+    if folder_id in selected:
+        selected.remove(folder_id)
+    else:
+        selected.append(folder_id)
+    await state.update_data(bq_sel=selected)
+    await callback.answer()
+    await _refresh_list(callback, state)
+
+
+@router.callback_query(UploadFlow.choosing_folder, F.data.in_({"bq:all", "bq:none"}))
+async def cb_batch_select_all(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    if callback.data == "bq:none":
+        selected: list[str] = []
+    else:
+        visible = _filtered_folders(data.get("fl_filter", FILTER_PENDING), data.get("fl_query", ""))[0]
+        selected = list(dict.fromkeys(list(data.get("bq_sel", [])) + [f["folder_id"] for f in visible]))
+    await state.update_data(bq_sel=selected)
+    await callback.answer(f"{len(selected)} klasör seçili.")
+    await _refresh_list(callback, state)
+
+
+def _batch_channels_view(data: dict[str, Any]) -> tuple[str, InlineKeyboardMarkup]:
+    chosen = set(data.get("bq_ch", []))
+    rows = []
+    for c in db.list_channels():
+        has_image = _channel_image(c["id"]) is not None
+        mark = "☑️" if c["id"] in chosen else "⬜"
+        note = "" if has_image else " — görsel yok"
+        rows.append([InlineKeyboardButton(text=f"{mark} {c['display_name']}{note}",
+                                          callback_data=f"bqc:{c['id']}")])
+    rows.append([InlineKeyboardButton(text="➡️ Devam", callback_data="bqc:go")])
+    rows.append([cancel_button()])
+    text = (f"📦 <b>{len(data.get('bq_sel', []))} klasör seçildi.</b>\n"
+            "Hangi kanal(lar)a yüklensin? Birden fazla işaretleyebilirsiniz.")
+    return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@router.callback_query(UploadFlow.choosing_folder, F.data == "bq:next")
+async def cb_batch_next(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    if not data.get("bq_sel"):
+        await callback.answer("Önce en az bir klasör işaretleyin.", show_alert=True)
+        return
+    if not db.list_channels():
+        await callback.answer("Kayıtlı kanal yok. Önce /kanallar ile kanal ekleyin.", show_alert=True)
+        return
+    await state.update_data(bq_ch=[])
+    await state.set_state(UploadFlow.batch_channels)
+    await callback.answer()
+    text, keyboard = _batch_channels_view(await state.get_data())
+    await callback.message.edit_text(text, reply_markup=keyboard)
+
+
+@router.callback_query(UploadFlow.batch_channels, F.data.startswith("bqc:"))
+async def cb_batch_channel(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    chosen = list(data.get("bq_ch", []))
+    action = callback.data.split(":", 1)[1]
+    if action != "go":
+        channel_id = int(action)
+        if channel_id in chosen:
+            chosen.remove(channel_id)
+        else:
+            chosen.append(channel_id)
+        await state.update_data(bq_ch=chosen)
+        await callback.answer()
+        text, keyboard = _batch_channels_view(await state.get_data())
+        try:
+            await callback.message.edit_text(text, reply_markup=keyboard)
+        except Exception:  # noqa: BLE001
+            pass
+        return
+
+    if not chosen:
+        await callback.answer("En az bir kanal işaretleyin.", show_alert=True)
+        return
+    channels = [c for c in db.list_channels() if c["id"] in chosen]
+    without_image = [c["display_name"] for c in channels if _channel_image(c["id"]) is None]
+    if without_image:
+        await callback.answer(
+            "Bu kanal(lar) için kayıtlı görsel yok: " + ", ".join(without_image)
+            + ". Önce o kanala bir kez tek tek yükleme yapın; görsel orada seçilir ve hatırlanır.",
+            show_alert=True,
         )
         return
 
-    rows.append([
-        InlineKeyboardButton(text="🗑️ Tümünü Çöpe At", callback_data="trash_all"),
-    ])
-    rows.append([cancel_button()])
-    await state.set_state(UploadFlow.choosing_folder)
-    await _safe_edit(scan_msg, f"🔍 Tarama bitti — {len(new_folders)} klasör yüklenebilir durumda.")
-    await scan_msg.answer(
-        "Yüklenecek klasörü seçin:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+    items = _batch_items(data.get("bq_sel", []), channels)
+    planned = len(data.get("bq_sel", [])) * len(channels)
+    if not items:
+        await callback.answer("Seçilen klasörlerin hepsi bu kanallara zaten yüklenmiş.", show_alert=True)
+        return
+
+    names = []
+    for folder_id in dict.fromkeys(fid for fid, _ in items):
+        folder = db.get_folder(folder_id)
+        if folder:
+            names.append(folder["folder_name"])
+    shown = "\n".join(f"• {esc(n)}" for n in names[:15])
+    more = f"\n… ve {len(names) - 15} klasör daha" if len(names) > 15 else ""
+    already = planned - len(items)
+    default_tags = [t["name"] for t in db.list_tags() if t["is_default"] == 1]
+    text = (
+        "🚦 <b>Toplu yükleme — son kontrol</b>\n\n"
+        f"📁 Klasör: <b>{len(names)}</b>\n"
+        f"📺 Kanal: <b>{esc(', '.join(c['display_name'] for c in channels))}</b>\n"
+        f"🎬 Toplam yükleme: <b>{len(items)}</b>"
+        + (f" ({already} tanesi zaten yüklü, atlanacak)" if already else "") + "\n\n"
+        f"{shown}{more}\n\n"
+        "Her video için: başlık = kanal öneki + klasör adı, açıklama = Word metni, "
+        f"görsel = kanalın kayıtlı görseli, etiketler = {esc(', '.join(default_tags)) or '—'}.\n"
+        "🌐 Görünürlük: <b>Herkese Açık</b>\n\n"
+        "Kanal her videoda otomatik doğrulanır; doğrulanamayan video yüklenmez ve atlanır. "
+        "Tek tek onay sorulmaz."
     )
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"🚀 Sırayı başlat ({len(items)} yükleme)", callback_data="bq:start")],
+        [cancel_button()],
+    ])
+    await state.update_data(bq_items=[[fid, cid] for fid, cid in items])
+    await state.set_state(UploadFlow.batch_confirm)
+    await callback.answer()
+    await callback.message.edit_text(text, reply_markup=keyboard)
+
+
+def _batch_items(folder_ids: list[str], channels: list[Any]) -> list[tuple[str, int]]:
+    """(klasör, kanal) çiftleri — o kanala zaten yüklenmiş olanlar hariç."""
+    uploads = db.get_all_folder_uploads()
+    items = []
+    for folder_id in folder_ids:
+        for channel in channels:
+            if channel["display_name"] not in uploads.get(folder_id, []):
+                items.append((folder_id, channel["id"]))
+    return items
+
+
+@router.callback_query(UploadFlow.batch_confirm, F.data == "bq:start")
+async def cb_batch_start(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    data = await state.get_data()
+    items = [(fid, cid) for fid, cid in data.get("bq_items", [])]
+    await state.clear()
+    if is_busy():
+        await callback.answer("Başka bir yükleme sürüyor; bitince tekrar deneyin.", show_alert=True)
+        return
+    await callback.answer("Sıra başlıyor!")
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:  # noqa: BLE001
+        pass
+    BATCH["active"] = True
+    BATCH["stop"] = False
+    asyncio.create_task(_run_batch(bot, callback.message.chat.id, items))
+
+
+@router.callback_query(F.data == "bq:stop")
+async def cb_batch_stop(callback: CallbackQuery) -> None:
+    if not BATCH["active"]:
+        await callback.answer("Çalışan bir sıra yok.", show_alert=True)
+        return
+    BATCH["stop"] = True
+    await callback.answer("Şu anki yükleme bitince sıra duracak.", show_alert=True)
 
 
 @router.callback_query(F.data == "history")
@@ -264,70 +567,94 @@ async def cb_pipeline_trash_cancel(callback: CallbackQuery) -> None:
     await callback.answer("İşlem iptal edildi.")
 
 
-@router.callback_query(UploadFlow.choosing_folder, F.data == "trash_all")
-async def cb_trash_all(callback: CallbackQuery, state: FSMContext) -> None:
-    await callback.answer()
-    folders = db.get_active_folders()
-    if not folders:
-        await callback.message.answer("Silinecek klasör bulunamadı.")
-        await state.clear()
-        return
+# /temizle — toplu çöpe atma. Bilerek klasör listesinin dışında, ayrı bir komut:
+# yanlışlıkla basılabilecek bir düğme olmasın.
 
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="✅ Evet, Hepsini Sil", callback_data="confirm_trash_all"),
-            InlineKeyboardButton(text="❌ İptal", callback_data="cancel_trash"),
-        ]
-    ])
+def _trash_candidates(scope: str) -> list[Any]:
+    folders = db.get_active_folders()
+    if scope == "all":
+        return folders
+    channels = db.get_all_channel_names()
+    uploads = db.get_all_folder_uploads()
+    return [f for f in folders if _is_complete(set(uploads.get(f["folder_id"], [])), channels)]
+
+
+@router.message(Command("temizle"))
+async def cmd_temizle(message: Message, state: FSMContext) -> None:
+    if is_busy():
+        await message.answer("⏳ Bir yükleme sürüyor; bitince tekrar deneyin.")
+        return
+    await state.clear()
+    done = _trash_candidates("done")
+    everything = _trash_candidates("all")
+    if not everything:
+        await message.answer("Silinecek klasör yok. (Liste /baslat ile yapılan son taramaya göredir.)")
+        return
+    rows = []
+    if done:
+        rows.append([InlineKeyboardButton(
+            text=f"🧹 Yalnızca tüm kanallara yüklenmişler ({len(done)})", callback_data="trash_scope:done")])
+    rows.append([InlineKeyboardButton(
+        text=f"🗑️ Yüklenmemişler dahil HEPSİ ({len(everything)})", callback_data="trash_scope:all")])
+    rows.append([InlineKeyboardButton(text="❌ Vazgeç", callback_data="trash_scope:cancel")])
+    await message.answer(
+        "🧹 <b>Drive temizliği</b>\n\n"
+        "Seçilen klasörler Google Drive <b>çöp kutusuna</b> taşınır "
+        "(Drive çöp kutusundan 30 gün içinde geri alınabilir).",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+    )
+
+
+@router.callback_query(F.data.startswith("trash_scope:"))
+async def cb_trash_scope(callback: CallbackQuery) -> None:
+    scope = callback.data.split(":", 1)[1]
+    await callback.answer()
+    if scope == "cancel":
+        await callback.message.edit_text("❌ Temizlik yapılmadı.")
+        return
+    folders = _trash_candidates(scope)
+    if not folders:
+        await callback.message.edit_text("Silinecek klasör kalmamış.")
+        return
+    what = "yüklenmemişler dahil <b>bütün</b> klasörleri" if scope == "all" \
+        else "tüm kanallara yüklenmiş klasörleri"
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text=f"✅ Evet, {len(folders)} klasörü taşı", callback_data=f"trash_go:{scope}"),
+        InlineKeyboardButton(text="❌ Vazgeç", callback_data="trash_scope:cancel"),
+    ]])
     await callback.message.edit_text(
-        f"⚠️ Listedeki <b>tüm klasörleri ({len(folders)} adet)</b> Google Drive çöp kutusuna taşımak istediğinize emin misiniz?",
+        f"⚠️ Drive'daki {what} (<b>{len(folders)} adet</b>) çöp kutusuna taşımak "
+        "istediğinize emin misiniz?",
         reply_markup=keyboard,
     )
 
 
-@router.callback_query(UploadFlow.choosing_folder, F.data == "confirm_trash_all")
-async def cb_confirm_trash_all(callback: CallbackQuery, state: FSMContext) -> None:
-    folders = db.get_active_folders()
-    if not folders:
-        await callback.answer("Silinecek klasör bulunamadı.", show_alert=True)
-        await state.clear()
+@router.callback_query(F.data.startswith("trash_go:"))
+async def cb_trash_go(callback: CallbackQuery) -> None:
+    scope = callback.data.split(":", 1)[1]
+    if is_busy():
+        await callback.answer("Bir yükleme sürüyor; bitince tekrar deneyin.", show_alert=True)
         return
-
-    await callback.answer("Hepsi siliniyor...")
-    await callback.message.edit_text(f"⏳ {len(folders)} klasör siliniyor, lütfen bekleyin...")
+    folders = _trash_candidates(scope)
+    await callback.answer("Taşınıyor...")
+    await callback.message.edit_text(f"⏳ {len(folders)} klasör çöp kutusuna taşınıyor...")
 
     success_count = 0
     fail_count = 0
-
     for f in folders:
         try:
             await asyncio.to_thread(drive.trash_file, f["folder_id"])
             db.delete_folder(f["folder_id"])
             RETRY_JOBS.pop(f["folder_id"], None)
             success_count += 1
-        except Exception:
+        except Exception:  # noqa: BLE001
             logger.exception("Klasör silinemedi: %s", f["folder_name"])
             fail_count += 1
 
     await callback.message.answer(
-        f"🧹 Temizlik tamamlandı:\n"
-        f"✅ {success_count} klasör silindi.\n"
-        f"❌ {fail_count} klasör silinemedi."
+        f"🧹 Temizlik tamamlandı:\n✅ {success_count} klasör çöp kutusuna taşındı."
+        + (f"\n❌ {fail_count} klasör taşınamadı." if fail_count else "")
     )
-
-    await state.clear()
-    await cmd_baslat(callback.message, state)
-
-
-@router.callback_query(UploadFlow.choosing_folder, F.data == "cancel_trash")
-async def cb_cancel_trash(callback: CallbackQuery, state: FSMContext) -> None:
-    await callback.answer()
-    try:
-        await callback.message.delete()
-    except Exception:  # noqa: BLE001
-        pass
-    await state.clear()
-    await cmd_baslat(callback.message, state)
 
 
 # ============================================================ klasör seçimi
@@ -452,6 +779,34 @@ async def _ask_image_source(message: Message, state: FSMContext) -> None:
     )
 
 
+def _channel_image(channel_id: int) -> str | None:
+    """Kanalın hatırlanan görseli (dosya hâlâ duruyorsa)."""
+    saved_path = db.get_setting(_channel_image_key(channel_id))
+    return saved_path if saved_path and Path(saved_path).exists() else None
+
+
+def _suggest_title(channel_id: int | None, folder_name: str) -> tuple[str, bool]:
+    """Önerilen başlık (kanal öneki + klasör adı) ve kırpılıp kırpılmadığı."""
+    prefix = db.get_setting(f"title_prefix:{channel_id}") if channel_id else None
+    full = f"{prefix} - {folder_name}" if prefix else folder_name
+    return full[:TITLE_MAX], len(full) > TITLE_MAX
+
+
+async def _load_description(folder_id: str, docx_file: dict[str, Any]) -> tuple[str, bool]:
+    """Word dosyasını indirip açıklama metnini çıkarır; (metin, kırpıldı mı) döner."""
+    docx_path = get_config().temp_dir / f"{folder_id}.docx"
+    try:
+        await asyncio.to_thread(drive.download_file, docx_file, docx_path)
+        text = await asyncio.to_thread(extract_text, docx_path)
+    finally:
+        if docx_path.exists():
+            try:
+                docx_path.unlink()
+            except OSError:
+                pass
+    return text[:DESCRIPTION_MAX], len(text) > DESCRIPTION_MAX
+
+
 def _remember_channel_image(channel_id: int | None, image_path: str) -> None:
     """Kanal için son kullanılan (kalıcı) görseli hatırlar."""
     if channel_id:
@@ -468,11 +823,13 @@ async def cb_choose_channel(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
 
     # Bu kanal için hatırlanan görsel varsa tek dokunuşla devam önerilir.
-    saved_path = db.get_setting(_channel_image_key(channel["id"]))
-    if saved_path and Path(saved_path).exists():
+    saved_path = _channel_image(channel["id"])
+    if saved_path:
         await state.set_state(UploadFlow.confirming_channel_image)
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Bu görselle devam", callback_data="chimg:keep")],
+            [InlineKeyboardButton(text="⚡ Hızlı yükle (bu görsel + varsayılanlar)",
+                                  callback_data="chimg:quick")],
+            [InlineKeyboardButton(text="✅ Bu görselle, adım adım", callback_data="chimg:keep")],
             [InlineKeyboardButton(text="🔄 Farklı görsel seç", callback_data="chimg:change")],
             [cancel_button()],
         ])
@@ -480,7 +837,9 @@ async def cb_choose_channel(callback: CallbackQuery, state: FSMContext) -> None:
             await callback.message.answer_photo(
                 FSInputFile(Path(saved_path)),
                 caption=(f"📺 Kanal: <b>{esc(channel['display_name'])}</b> ✅\n\n"
-                         "🖼 Bu kanalın kayıtlı görseli bu. Bununla devam edilsin mi?"),
+                         "🖼 Bu kanalın kayıtlı görseli bu.\n"
+                         "⚡ <b>Hızlı yükle</b>: etiket, başlık ve açıklama varsayılanlarla "
+                         "hazırlanır; doğrudan son kontrol kartına gidilir."),
                 reply_markup=keyboard,
             )
             return
@@ -494,14 +853,44 @@ async def cb_choose_channel(callback: CallbackQuery, state: FSMContext) -> None:
 @router.callback_query(UploadFlow.confirming_channel_image, F.data == "chimg:keep")
 async def cb_channel_image_keep(callback: CallbackQuery, state: FSMContext) -> None:
     data = await state.get_data()
-    saved_path = db.get_setting(_channel_image_key(data["channel_id"]))
-    if not (saved_path and Path(saved_path).exists()):
+    saved_path = _channel_image(data["channel_id"])
+    if not saved_path:
         await callback.answer("Görsel artık yok, yeniden seçin.", show_alert=True)
         await _ask_image_source(callback.message, state)
         return
     await state.update_data(image_path=saved_path, image_is_temp=False)
     await callback.answer("Kanal görseliyle devam ediliyor.")
     await _ask_tags(callback.message, state)
+
+
+@router.callback_query(UploadFlow.confirming_channel_image, F.data == "chimg:quick")
+async def cb_channel_quick(callback: CallbackQuery, state: FSMContext) -> None:
+    """Hızlı yükleme: kayıtlı görsel + varsayılan etiketler + önerilen başlık + Word metni."""
+    data = await state.get_data()
+    saved_path = _channel_image(data["channel_id"])
+    if not saved_path:
+        await callback.answer("Görsel artık yok, yeniden seçin.", show_alert=True)
+        await _ask_image_source(callback.message, state)
+        return
+    await callback.answer("Hazırlanıyor...")
+    reading_msg = await callback.message.answer("📄 Word dosyası okunuyor...")
+    try:
+        description, _ = await _load_description(data["folder_id"], data["docx_file"])
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Açıklama metni çıkarılamadı.")
+        await _safe_edit(reading_msg, f"❌ Word dosyası okunamadı: {esc(str(exc))}")
+        await state.clear()
+        return
+    await _safe_edit(reading_msg, "📄 Word dosyası okundu ✅")
+    title, _ = _suggest_title(data.get("channel_id"), data["folder_name"])
+    await state.update_data(
+        image_path=saved_path,
+        image_is_temp=False,
+        selected_tags=[t["name"] for t in db.list_tags() if t["is_default"] == 1],
+        title=title,
+        description=description,
+    )
+    await _final_confirm(callback.message, state)
 
 
 @router.callback_query(UploadFlow.confirming_channel_image, F.data == "chimg:change")
@@ -742,13 +1131,11 @@ async def cb_tag_continue(callback: CallbackQuery, state: FSMContext) -> None:
 
 async def _ask_title(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
-    prefix = db.get_setting(f"title_prefix:{data['channel_id']}") if data.get("channel_id") else None
-    full = f"{prefix} - {data['folder_name']}" if prefix else data["folder_name"]
-    suggested = full[:TITLE_MAX]
+    suggested, was_cut = _suggest_title(data.get("channel_id"), data["folder_name"])
     await state.update_data(title=suggested)
     await state.set_state(UploadFlow.confirming_title)
     note = ""
-    if len(full) > TITLE_MAX:
+    if was_cut:
         note = f"\n⚠️ Başlık {TITLE_MAX} karakteri aştığı için kırpıldı."
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Onayla", callback_data="title:ok"),
@@ -799,27 +1186,16 @@ async def _ask_description(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     reading_msg = await message.answer("📄 Word dosyası okunuyor...")
 
-    cfg = get_config()
-    docx_file = data["docx_file"]
-    docx_path = cfg.temp_dir / f"{data['folder_id']}.docx"
     try:
-        await asyncio.to_thread(drive.download_file, docx_file, docx_path)
-        text = await asyncio.to_thread(extract_text, docx_path)
+        text, was_cut = await _load_description(data["folder_id"], data["docx_file"])
     except (DriveError, DocxError, Exception) as exc:  # noqa: BLE001
         logger.exception("Açıklama metni çıkarılamadı.")
         await _safe_edit(reading_msg, f"❌ Word dosyası okunamadı: {esc(str(exc))}")
         await state.clear()
         return
-    finally:
-        if docx_path.exists():
-            try:
-                docx_path.unlink()
-            except OSError:
-                pass
 
     truncated_note = ""
-    if len(text) > DESCRIPTION_MAX:
-        text = text[:DESCRIPTION_MAX]
+    if was_cut:
         truncated_note = f"\n\n⚠️ Metin {DESCRIPTION_MAX} karakteri aştığı için kırpıldı."
 
     await state.update_data(description=text)
@@ -889,11 +1265,13 @@ async def _final_confirm(message: Message, state: FSMContext) -> None:
         f"📁 Klasör: <b>{esc(data['folder_name'])}</b>\n"
         f"📺 Kanal: <b>{esc(data['channel_name'])}</b>\n"
         f"🎬 Başlık: <b>{esc(data['title'])}</b>\n"
+        f"🏷️ Etiketler: {esc(', '.join(data.get('selected_tags') or [])) or '—'}\n"
         f"📝 Açıklama: {esc(description[:200])}{'…' if len(description) > 200 else ''}\n"
         f"🌐 Görünürlük: <b>Herkese Açık</b>"
     )
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🚀 Yükle", callback_data="upload:go"), cancel_button()],
+        [InlineKeyboardButton(text="✏️ Etiket / başlık / açıklamayı düzenle", callback_data="upload:edit")],
     ])
     try:
         await message.answer_photo(FSInputFile(Path(data["image_path"])),
@@ -901,6 +1279,17 @@ async def _final_confirm(message: Message, state: FSMContext) -> None:
     except Exception:  # noqa: BLE001 — görsel gönderilemezse metinle devam
         logger.exception("Özet kartındaki görsel gönderilemedi.")
         await message.answer(caption, reply_markup=keyboard)
+
+
+@router.callback_query(UploadFlow.final_confirm, F.data == "upload:edit")
+async def cb_upload_edit(callback: CallbackQuery, state: FSMContext) -> None:
+    """Son karttan geri dönüp etiket → başlık → açıklama adımlarını tek tek gözden geçirir."""
+    await callback.answer()
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:  # noqa: BLE001
+        pass
+    await _ask_tags(callback.message, state)
 
 
 @router.callback_query(UploadFlow.final_confirm, F.data == "upload:go")
@@ -938,7 +1327,7 @@ async def cb_retry(callback: CallbackQuery, bot: Bot) -> None:
         await callback.answer("Bu iş için tekrar deneme kaydı yok (bot yeniden başlamış olabilir).",
                               show_alert=True)
         return
-    if UPLOAD_LOCK.locked():
+    if is_busy():
         await callback.answer("Başka bir yükleme sürüyor, bitince tekrar deneyin.", show_alert=True)
         return
     await callback.answer("Tekrar deneniyor...")
@@ -951,13 +1340,22 @@ async def cb_retry(callback: CallbackQuery, bot: Bot) -> None:
 
 # ============================================================ pipeline
 
-async def _run_pipeline(bot: Bot, job: UploadJob) -> None:
-    """İndir → ffmpeg → Studio yükle. Hata durumunda mp4 saklanır, retry sunulur."""
+async def _run_pipeline(bot: Bot, job: UploadJob, *, interactive: bool = True) -> str:
+    """İndir → ffmpeg → Studio yükle. Hata durumunda mp4 saklanır, retry sunulur.
+
+    Args:
+        interactive: False ise (toplu sıra) kanal için ekran görüntülü onay ve
+            "çöpe at" sorusu sorulmaz; kanalı uploader kendisi doğrular.
+
+    Returns:
+        ``"ok"``, ``"failed"``, ``"session"`` (Google oturumu düşmüş) veya ``"busy"``.
+    """
     cfg = get_config()
     if UPLOAD_LOCK.locked():
         await bot.send_message(job.chat_id, "⏳ Başka bir yükleme sürüyor; bitince tekrar deneyin.")
-        return
+        return "busy"
 
+    result = "failed"
     async with UPLOAD_LOCK:
         try:
             # 1) Ses dosyası (retry'da zaten inmişse atla)
@@ -1035,7 +1433,7 @@ async def _run_pipeline(bot: Bot, job: UploadJob) -> None:
                     tags=job.tags,
                     on_progress=on_progress,
                     on_screenshot=on_screenshot,
-                    on_channel_confirm=on_channel_confirm,
+                    on_channel_confirm=on_channel_confirm if interactive else None,
                 ),
                 timeout=(cfg.upload_timeout_minutes + 10) * 60,
             )
@@ -1052,21 +1450,26 @@ async def _run_pipeline(bot: Bot, job: UploadJob) -> None:
                 disable_web_page_preview=False,
             )
 
-            # Çöpe atma sorgusu
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [
-                    InlineKeyboardButton(text="🗑️ Evet, Çöpe At", callback_data=f"pipeline_trash:ask:{job.folder_id}"),
-                    InlineKeyboardButton(text="❌ Hayır", callback_data=f"pipeline_trash:cancel:{job.folder_id}")
-                ]
-            ])
-            await bot.send_message(
-                job.chat_id,
-                f"📂 <b>{esc(job.folder_name)}</b> klasörünü Google Drive çöp kutusuna taşımak ister misiniz?",
-                reply_markup=keyboard,
-            )
+            result = "ok"
+
+            # Çöpe atma sorgusu (toplu sırada sorulmaz; /temizle ile topluca yapılır)
+            if interactive:
+                keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                    [
+                        InlineKeyboardButton(text="🗑️ Evet, Çöpe At", callback_data=f"pipeline_trash:ask:{job.folder_id}"),
+                        InlineKeyboardButton(text="❌ Hayır", callback_data=f"pipeline_trash:cancel:{job.folder_id}")
+                    ]
+                ])
+                await bot.send_message(
+                    job.chat_id,
+                    f"📂 <b>{esc(job.folder_name)}</b> klasörünü Google Drive çöp kutusuna taşımak ister misiniz?",
+                    reply_markup=keyboard,
+                )
 
         except SessionExpiredError as exc:
-            await _handle_failure(bot, job, str(exc), header="🔑 Google oturumu düşmüş.")
+            result = "session"
+            await _handle_failure(bot, job, str(exc),
+                                  header="🔑 Google oturumu düşmüş. /giris ile yeniden giriş yapın.")
         except asyncio.TimeoutError:
             await _handle_failure(
                 bot, job,
@@ -1092,6 +1495,111 @@ async def _run_pipeline(bot: Bot, job: UploadJob) -> None:
         except Exception as exc:  # noqa: BLE001 — beklenmedik hata da kullanıcıya bildirilir
             logger.exception("Yükleme pipeline'ında beklenmedik hata.")
             await _handle_failure(bot, job, str(exc), header="❌ Beklenmedik bir hata oluştu.")
+    return result
+
+
+# ============================================================ toplu sıra
+
+async def _build_default_job(chat_id: int, folder: Any, channel: Any) -> UploadJob:
+    """Toplu sıra için varsayılanlarla iş kurar.
+
+    Raises:
+        ValueError: Görsel ya da klasör dosyaları eksikse (Türkçe açıklamayla).
+    """
+    image_path = _channel_image(channel["id"])
+    if not image_path:
+        raise ValueError(f"'{channel['display_name']}' kanalının kayıtlı görseli yok.")
+    files = await asyncio.to_thread(drive.list_files, folder["folder_id"])
+    audio, docx = drive.find_audio_and_docx(files)
+    if audio is None or docx is None:
+        missing = " ve ".join(n for n, f in (("ses", audio), ("Word", docx)) if f is None)
+        raise ValueError(f"'{folder['folder_name']}' klasöründe {missing} dosyası yok.")
+    description, _ = await _load_description(folder["folder_id"], docx)
+    title, _ = _suggest_title(channel["id"], folder["folder_name"])
+    return UploadJob(
+        chat_id=chat_id,
+        folder_id=folder["folder_id"],
+        folder_name=folder["folder_name"],
+        channel_name=channel["display_name"],
+        image_path=Path(image_path),
+        image_is_temp=False,
+        title=title,
+        description=description,
+        audio_file=audio,
+        tags=[t["name"] for t in db.list_tags() if t["is_default"] == 1],
+    )
+
+
+async def _run_batch(bot: Bot, chat_id: int, items: list[tuple[str, int]]) -> None:
+    """Seçilen (klasör, kanal) çiftlerini sırayla yükler; sonunda özet gönderir."""
+    total = len(items)
+    ok = failed = skipped = 0
+    stopped_because = ""
+    stop_keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="⏹ Sırayı durdur", callback_data="bq:stop")
+    ]])
+    try:
+        await bot.send_message(
+            chat_id,
+            f"📦 <b>Toplu yükleme başladı</b> — {total} yükleme sırada.\n"
+            "Her biri bitince linki gönderilecek.",
+            reply_markup=stop_keyboard,
+        )
+        for index, (folder_id, channel_id) in enumerate(items, start=1):
+            if BATCH["stop"]:
+                stopped_because = "Sıra isteğiniz üzerine durduruldu."
+                break
+            folder = db.get_folder(folder_id)
+            channel = db.get_channel(channel_id)
+            if folder is None or channel is None:
+                skipped += 1
+                continue
+            if channel["display_name"] in db.get_uploaded_channels_for_folder(folder_id):
+                skipped += 1
+                continue
+
+            await bot.send_message(
+                chat_id,
+                f"📦 <b>{index}/{total}</b> — {esc(folder['folder_name'])} → "
+                f"{esc(channel['display_name'])}",
+            )
+            try:
+                job = await _build_default_job(chat_id, folder, channel)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Toplu sırada iş kurulamadı: %s", folder["folder_name"])
+                failed += 1
+                await bot.send_message(chat_id, f"⚠️ Atlandı: {esc(str(exc))}")
+                continue
+
+            result = await _run_pipeline(bot, job, interactive=False)
+            if result == "ok":
+                ok += 1
+            else:
+                failed += 1
+                if result == "session":
+                    stopped_because = "Google oturumu düştüğü için sıra durduruldu."
+                    break
+    except Exception:  # noqa: BLE001
+        logger.exception("Toplu yükleme sırası beklenmedik biçimde durdu.")
+        stopped_because = "Beklenmedik bir hata yüzünden sıra durdu."
+    finally:
+        BATCH["active"] = False
+        BATCH["stop"] = False
+
+    remaining = total - ok - failed - skipped
+    lines = ["📦 <b>Toplu yükleme bitti</b>" if not stopped_because
+             else f"📦 <b>Toplu yükleme durdu</b> — {stopped_because}"]
+    lines.append(f"✅ Yayınlanan: {ok}")
+    if failed:
+        lines.append(f"❌ Başarısız: {failed} (yukarıdaki 🔁 Tekrar dene düğmeleriyle yeniden denenebilir)")
+    if skipped:
+        lines.append(f"⏭ Atlanan (zaten yüklü): {skipped}")
+    if remaining > 0:
+        lines.append(f"⏸ Başlanmayan: {remaining}")
+    try:
+        await bot.send_message(chat_id, "\n".join(lines))
+    except Exception:  # noqa: BLE001
+        logger.exception("Toplu yükleme özeti gönderilemedi.")
 
 
 async def _handle_failure(bot: Bot, job: UploadJob, detail: str, *, header: str) -> None:
