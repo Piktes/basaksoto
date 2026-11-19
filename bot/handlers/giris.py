@@ -1,8 +1,9 @@
 """/giris — Google oturumu düştüğünde Telegram'dan uzaktan giriş başlatır.
 
 Sunucudaki tarayıcı ekranı geçici olarak yayınlanır; bağlantı ve tek kullanımlık
-parola bu sohbete gönderilir. Oturum sürerken bu sohbete yazılan metin uzak
-tarayıcıda odaktaki alana yazılır (uzak klavyede çıkmayan @ gibi karakterler için).
+parola bu sohbete gönderilir. Ekran yayındayken (``/giris`` ya da yükleme
+sırasındaki kimlik doğrulaması) bu sohbete yazılan metin uzak tarayıcıda
+odaktaki alana yazılır — uzak klavyede çıkmayan @ gibi karakterler için.
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from ..config import get_config
-from ..services import remote_login
+from ..services import remote_login, vnc
 from ..services.studio_uploader import UPLOAD_LOCK
 from .common import esc, is_busy
 
@@ -23,12 +24,12 @@ logger = logging.getLogger(__name__)
 
 router = Router(name="giris")
 
-# Süren oturum (aynı anda en çok bir tane): chat_id → oturum
+# Süren giriş oturumu (aynı anda en çok bir tane): chat_id → oturum
 _ACTIVE: dict[int, remote_login.RemoteLoginSession] = {}
 
 
-def _has_active_session(message: Message) -> bool:
-    return message.chat.id in _ACTIVE
+def _has_remote_screen(message: Message) -> bool:
+    return message.chat.id in vnc.TYPE_TARGETS
 
 
 @router.message(Command("giris"))
@@ -50,24 +51,21 @@ async def _run_session(bot: Bot, chat_id: int) -> None:
     session = remote_login.RemoteLoginSession(get_config())
     async with UPLOAD_LOCK:  # tarayıcı profili bu sırada başka işte kullanılamaz
         _ACTIVE[chat_id] = session
+        vnc.TYPE_TARGETS[chat_id] = session.active_page
         runner = asyncio.create_task(session.run())
         try:
             await session.ready.wait()
             if session.failed:
                 await bot.send_message(chat_id, f"❌ Giriş ekranı açılamadı: {esc(session.failed)}")
                 return
-            password_line = (
-                "Parola: Dokploy'daki <code>VNC_PASSWORD</code> değeri" if session.external_vnc
-                else f"Parola: <code>{session.password}</code>"
-            )
             keyboard = InlineKeyboardMarkup(inline_keyboard=[[
                 InlineKeyboardButton(text="✅ Giriş tamam, kapat", callback_data="giris:done")
             ]])
             await bot.send_message(
                 chat_id,
                 "🔑 <b>Uzaktan giriş açıldı</b>\n\n"
-                f"1. Şu adresi açıp <b>Connect</b>'e basın:\n{esc(remote_login.vnc_url())}\n"
-                f"2. {password_line}\n"
+                f"1. Şu adresi açıp <b>Connect</b>'e basın:\n{esc(vnc.url())}\n"
+                f"2. {session.broadcast.password_line}\n"
                 "3. Açılan tarayıcıda Google hesabına giriş yapın ve YouTube Studio'yu görün.\n"
                 "4. Bitince aşağıdaki düğmeye basın.\n\n"
                 "⌨️ Uzak ekranda yazamadığınız bir metni (ör. <code>@</code> içeren e-posta) "
@@ -79,6 +77,7 @@ async def _run_session(bot: Bot, chat_id: int) -> None:
             await runner
         finally:
             _ACTIVE.pop(chat_id, None)
+            vnc.TYPE_TARGETS.pop(chat_id, None)
             if not runner.done():
                 session.finish()
                 await runner
@@ -111,16 +110,18 @@ async def cb_giris_done(callback: CallbackQuery) -> None:
     session.finish()
 
 
-@router.message(_has_active_session, F.text, ~F.text.startswith("/"))
+@router.message(_has_remote_screen, F.text, ~F.text.startswith("/"))
 async def msg_type_into_remote(message: Message) -> None:
-    """Giriş oturumu sürerken gelen metni uzak tarayıcıya yazar, mesajı sohbetten siler."""
-    session = _ACTIVE.get(message.chat.id)
+    """Ekran yayındayken gelen metni uzak tarayıcıya yazar, mesajı sohbetten siler."""
+    get_page = vnc.TYPE_TARGETS.get(message.chat.id)
     typed = False
-    if session is not None:
-        try:
-            typed = await session.type_text(message.text)
-        except Exception:  # noqa: BLE001
-            logger.exception("Metin uzak tarayıcıya yazılamadı.")
+    try:
+        page = get_page() if get_page else None
+        if page is not None:
+            await page.keyboard.insert_text(message.text)
+            typed = True
+    except Exception:  # noqa: BLE001
+        logger.exception("Metin uzak tarayıcıya yazılamadı.")
     try:
         await message.delete()  # parola olabilir; sohbet geçmişinde kalmasın
     except Exception:  # noqa: BLE001

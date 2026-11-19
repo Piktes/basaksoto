@@ -26,7 +26,7 @@ from playwright.async_api import (
 )
 
 from ..config import Config, get_config
-from . import db
+from . import db, vnc
 
 logger = logging.getLogger(__name__)
 
@@ -126,7 +126,9 @@ _UCID_RE = re.compile(r"UC[\w-]{22}")
 _UCID_JSON_RE = re.compile(r'"(?:channelId|externalId)":"(UC[\w-]{22})"')
 
 
-_CODE_INPUT = "input[type=tel], input[id=code], input[name=code], input[type=text]"
+MANUAL_VERIFY_MINUTES = 10  # kullanıcının uzak ekranda doğrulamayı bitirmesi için süre
+
+_CODE_INPUT ="input[type=tel], input[id=code], input[name=code], input[type=text]"
 
 
 def _norm(text: str) -> str:
@@ -366,24 +368,89 @@ class StudioUploader:
                 "Google 'Kimliğinizi doğrulayın' diyaloğu çıktı ve onaylanmadı veya oturum düşmüş."
             )
 
+    async def _identity_dialog_visible(self, page: Page) -> bool:
+        for text in TEXTS["verify_identity"]:
+            try:
+                if await page.get_by_text(text, exact=False).first.is_visible():
+                    return True
+            except Exception:  # noqa: BLE001
+                continue
+        return False
+
+    async def _manual_identity_check(self, page: Page) -> bool:
+        """Ekranı yayınlar ve kullanıcı doğrulamayı bu tarayıcıda bitirene kadar bekler.
+
+        Raises:
+            StudioUploadError: Süre içinde doğrulama tamamlanmazsa.
+        """
+        context = page.context
+        pages_before = len(context.pages)
+        chat_id = getattr(self, "_chat_id", None)
+
+        async def verification_done() -> bool:
+            if len(context.pages) > pages_before:  # Google'ın doğrulama sekmesi hâlâ açık
+                return False
+            if _is_login_url(page.url):
+                return False
+            return not await self._identity_dialog_visible(page)
+
+        async with vnc.Broadcast() as broadcast:
+            if chat_id is not None:
+                vnc.TYPE_TARGETS[chat_id] = lambda: context.pages[-1] if context.pages else None
+            try:
+                message = (
+                    "🔑 <b>Google kimlik doğrulaması istiyor</b> — yükleme sizi bekliyor.\n\n"
+                    f"1. Şu adresi açıp <b>Connect</b>'e basın:\n{vnc.url()}\n"
+                    f"2. {broadcast.password_line}\n"
+                    "3. Ekrandaki tarayıcıda <b>Sonraki</b>'ye basıp doğrulamayı tamamlayın "
+                    "(parola, telefon onayı ya da kod).\n\n"
+                    "Bitince başka bir şey yapmanız gerekmez; yükleme kendiliğinden devam eder.\n"
+                    "⌨️ Uzak ekranda yazamadığınız metni bu sohbete yazın, tarayıcıya yazılır.\n"
+                    f"Süre: {MANUAL_VERIFY_MINUTES} dakika."
+                )
+                screenshot = await self._safe_screenshot(page)
+                if screenshot and self._on_screenshot:
+                    await self._on_screenshot(screenshot, message)
+                elif self._on_progress:
+                    await self._on_progress(message)
+
+                deadline = asyncio.get_running_loop().time() + MANUAL_VERIFY_MINUTES * 60
+                calm = 0  # art arda kaç denetimde doğrulama bitmiş göründü
+                while asyncio.get_running_loop().time() < deadline:
+                    await asyncio.sleep(2)
+                    try:
+                        calm = calm + 1 if await verification_done() else 0
+                    except Exception:  # noqa: BLE001 — sayfa geçiş halindeyken okunamayabilir
+                        calm = 0
+                    if calm >= 3:
+                        logger.info("Kimlik doğrulaması kullanıcı tarafından tamamlandı.")
+                        if self._on_progress:
+                            await self._on_progress("✅ Kimlik doğrulandı, yükleme devam ediyor...")
+                        return True
+            finally:
+                if chat_id is not None:
+                    vnc.TYPE_TARGETS.pop(chat_id, None)
+
+        raise StudioUploadError(
+            "kimlik doğrulama",
+            f"Google kimlik doğrulaması {MANUAL_VERIFY_MINUTES} dakika içinde tamamlanmadı. "
+            "🔁 Tekrar dene'ye basınca ekran yeniden açılır.",
+            await self._safe_screenshot(page),
+        )
+
     async def _handle_identity_check(self, page: Page) -> bool:
         """Google'ın 'Kimliğinizi doğrulayın' diyaloğu çıktığında bota bildirim
         gönderip kurtarma e-postası seçeneğini tetikler ve kullanıcının gireceği kodu bekler.
         """
-        is_identity_dialog = False
-        for text in TEXTS["verify_identity"]:
-            modal = page.get_by_text(text, exact=False).first
-            try:
-                if await modal.is_visible():
-                    is_identity_dialog = True
-                    break
-            except Exception:
-                continue
-
-        if not is_identity_dialog:
+        if not await self._identity_dialog_visible(page):
             return False
 
         logger.info("Kimliğinizi doğrulayın diyaloğu tespit edildi! İşlem duraklatılıyor...")
+        # Sunucuda: ekran kullanıcıya açılır, doğrulamayı AYNI tarayıcıda kendisi geçer.
+        # (Doğrulama /giris ile ayrı bir tarayıcı oturumunda geçilince yüklemeye taşınmıyor.)
+        if vnc.unavailable_reason() is None:
+            return await self._manual_identity_check(page)
+
         if self._on_progress:
             await self._on_progress("🔑 Google kimlik doğrulaması istedi. 'Sonraki' butonuna basılıyor...")
 
