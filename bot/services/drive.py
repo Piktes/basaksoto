@@ -39,6 +39,7 @@ DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.docu
 FOLDER_MIME = "application/vnd.google-apps.folder"
 
 _MAX_RETRIES = 4
+_PARENT_BATCH = 20  # tek sorguda taranan klasör sayısı
 
 T = TypeVar("T")
 
@@ -136,6 +137,60 @@ def list_subfolders(root_folder_id: str) -> list[dict[str, Any]]:
         page_token = resp.get("nextPageToken")
         if not page_token:
             return folders
+
+
+def _is_media(file: dict[str, Any]) -> bool:
+    """Dosya bir şarkı klasörüne ait olabilecek türde mi (audio / Word / Google Doküman)?"""
+    name = file["name"].lower()
+    return (
+        name.endswith(AUDIO_EXTENSIONS)
+        or name.endswith(DOCX_EXTENSION)
+        or file.get("mimeType") == GOOGLE_DOC_MIME
+    )
+
+
+@_with_retry
+def _folders_with_media(folder_ids: list[str]) -> set[str]:
+    """Verilen klasörlerden, doğrudan içinde audio veya Word dosyası olanların ID'leri."""
+    service = get_service()
+    found: set[str] = set()
+    wanted = set(folder_ids)
+    for start in range(0, len(folder_ids), _PARENT_BATCH):
+        batch = folder_ids[start:start + _PARENT_BATCH]
+        parents = " or ".join(f"'{fid}' in parents" for fid in batch)
+        query = f"({parents}) and mimeType!='{FOLDER_MIME}' and trashed=false"
+        page_token: str | None = None
+        while True:
+            resp = service.files().list(
+                q=query,
+                fields="nextPageToken, files(name, mimeType, parents)",
+                pageSize=1000,
+                pageToken=page_token,
+            ).execute()
+            for file in resp.get("files", []):
+                if _is_media(file):
+                    found.update(wanted.intersection(file.get("parents", [])))
+            page_token = resp.get("nextPageToken")
+            if not page_token:
+                break
+    return found
+
+
+def list_song_folders(root_folder_id: str) -> list[dict[str, Any]]:
+    """Ana klasördeki şarkı klasörlerini listeler.
+
+    İçinde doğrudan audio veya Word dosyası bulunmayan klasörler (boş klasörler,
+    yalnızca alt klasör içeren arşiv/kategori klasörleri) şarkı klasörü değildir
+    ve listeye alınmaz.
+    """
+    folders = list_subfolders(root_folder_id)
+    if not folders:
+        return folders
+    with_media = _folders_with_media([f["id"] for f in folders])
+    skipped = [f["name"] for f in folders if f["id"] not in with_media]
+    if skipped:
+        logger.info("Şarkı klasörü olmayan %d klasör atlandı: %s", len(skipped), ", ".join(skipped))
+    return [f for f in folders if f["id"] in with_media]
 
 
 @_with_retry

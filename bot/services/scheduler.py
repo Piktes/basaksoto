@@ -32,7 +32,7 @@ async def check_pending_uploads(bot: Bot, config: Config) -> None:
     logger.info("Zamanlanmış Drive taraması başlatılıyor...")
     try:
         # Drive alt klasörlerini listele
-        folders = await asyncio.to_thread(drive.list_subfolders, config.drive_root_folder_id)
+        folders = await asyncio.to_thread(drive.list_song_folders, config.drive_root_folder_id)
         
         # Veritabanı ile eşitle
         new_folders = db.sync_folders(folders)

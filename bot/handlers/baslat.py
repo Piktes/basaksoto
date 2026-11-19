@@ -133,7 +133,7 @@ async def cmd_baslat(message: Message, state: FSMContext) -> None:
 
     scan_msg = await message.answer("🔍 Drive taranıyor...")
     try:
-        folders = await asyncio.to_thread(drive.list_subfolders, get_config().drive_root_folder_id)
+        folders = await asyncio.to_thread(drive.list_song_folders, get_config().drive_root_folder_id)
     except (DriveError, Exception) as exc:  # noqa: BLE001
         logger.exception("Drive taraması başarısız.")
         await _safe_edit(scan_msg, f"❌ Drive taranamadı: {esc(str(exc))}")
