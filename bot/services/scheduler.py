@@ -7,6 +7,7 @@ from aiogram import Bot
 
 from ..config import Config
 from . import backup, db, drive
+from .studio_uploader import UPLOAD_LOCK, StudioUploader
 
 logger = logging.getLogger(__name__)
 
@@ -115,8 +116,53 @@ async def backup_loop(bot: Bot, config: Config) -> None:
             await asyncio.sleep(3600)
 
 
+SESSION_CHECK_HOUR = 8  # her sabah 08:00'de Google oturumu denetlenir
+
+
+async def check_google_session(bot: Bot, config: Config) -> None:
+    """Google oturumunu denetler; düşmüşse yetkili kullanıcılara haber verir."""
+    from ..handlers.common import is_busy  # döngüsel içe aktarmayı önlemek için burada
+
+    if is_busy():
+        logger.info("Oturum kontrolü atlandı: tarayıcı şu an başka bir işte.")
+        return
+    async with UPLOAD_LOCK:  # tarayıcı profili aynı anda tek işte kullanılabilir
+        alive = await StudioUploader(config).is_session_alive()
+    if alive:
+        logger.info("Oturum kontrolü: Google oturumu açık.")
+        return
+    logger.warning("Oturum kontrolü: Google oturumu düşmüş.")
+    for user_id in config.allowed_user_ids:
+        try:
+            await bot.send_message(
+                user_id,
+                "🔑 <b>Google oturumu düşmüş.</b>\n"
+                "Yükleme yapabilmek için /giris yazıp yeniden giriş yapın.",
+            )
+        except Exception:
+            logger.exception("Oturum uyarısı %s kullanıcısına gönderilemedi.", user_id)
+
+
+async def session_check_loop(bot: Bot, config: Config) -> None:
+    """Her sabah Google oturumunu denetler (oturumu taze tutar, düşüşü erken bildirir)."""
+    while True:
+        try:
+            await asyncio.sleep(seconds_until_hour(datetime.now(), SESSION_CHECK_HOUR))
+            await check_google_session(bot, config)
+            await asyncio.sleep(5)
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            logger.exception("Oturum kontrolü başarısız. Yarın yeniden denenecek.")
+            await asyncio.sleep(60)
+
+
 async def _run_all(bot: Bot, config: Config) -> None:
-    await asyncio.gather(scheduler_loop(bot, config), backup_loop(bot, config))
+    await asyncio.gather(
+        scheduler_loop(bot, config),
+        backup_loop(bot, config),
+        session_check_loop(bot, config),
+    )
 
 
 def start_scheduler(bot: Bot, config: Config) -> asyncio.Task:

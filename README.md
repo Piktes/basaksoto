@@ -21,6 +21,8 @@ lokal çalışır.
 - **Kanal doğrulama** — Studio, kanalın kimliğiyle (`/channel/UC…`) açılır ve aktif kanal
   adı dosya verilmeden ve yayınlanmadan önce denetlenir; tutmazsa yükleme yapılmaz
 - `/giris` — Google oturumu düşünce Telegram'dan uzaktan giriş (yalnızca sunucuda)
+- **Günlük oturum kontrolü** — her sabah 08:00'de Studio açılıp Google oturumu denetlenir;
+  düşmüşse yükleme denemeden önce haber verilir
 - `/yedek` — veritabanı yedeği (her gece otomatik); yedek dosyasını bota göndererek geri yükleme
 - `/temizle` — yüklenmiş klasörleri Drive çöp kutusuna taşır
 - Görsel + audio → ffmpeg ile 1920×1080 H.264/AAC mp4 (letterbox, oran korunur)

@@ -623,6 +623,29 @@ class StudioUploader:
             )
         return ucid
 
+    async def is_session_alive(self) -> bool:
+        """Studio'yu kalıcı profille açıp Google oturumunun sürdüğünü denetler.
+
+        Günlük kontrol için: oturum çerezlerini taze tutar ve oturum düşmüşse
+        bunu bir yükleme sırasında değil, önceden fark etmeyi sağlar.
+        """
+        _clear_profile_locks(self._cfg)
+        async with async_playwright() as pw:
+            context = await pw.chromium.launch_persistent_context(**_launch_kwargs(self._cfg))
+            try:
+                page = context.pages[0] if context.pages else await context.new_page()
+                page.set_default_timeout(60_000)
+                await page.goto(STUDIO_URL, wait_until="domcontentloaded")
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=20_000)
+                except PlaywrightTimeoutError:
+                    pass  # networkidle gelmese de adres kontrolü yeterli
+                if _is_login_url(page.url):
+                    return False
+                return "studio.youtube.com" in page.url
+            finally:
+                await context.close()
+
     async def detect_channels(self) -> list[dict[str, str]]:
         """Hesaptaki kanalları bulur: ad + kanal kimliği, Studio'da doğrulanmış olarak.
 
