@@ -126,6 +126,9 @@ _UCID_RE = re.compile(r"UC[\w-]{22}")
 _UCID_JSON_RE = re.compile(r'"(?:channelId|externalId)":"(UC[\w-]{22})"')
 
 
+_CODE_INPUT = "input[type=tel], input[id=code], input[name=code], input[type=text]"
+
+
 def _norm(text: str) -> str:
     return re.sub(r"\s+", " ", text or "").strip().casefold()
 
@@ -367,12 +370,11 @@ class StudioUploader:
         """Google'ın 'Kimliğinizi doğrulayın' diyaloğu çıktığında bota bildirim
         gönderip kurtarma e-postası seçeneğini tetikler ve kullanıcının gireceği kodu bekler.
         """
-        import time
         is_identity_dialog = False
         for text in TEXTS["verify_identity"]:
             modal = page.get_by_text(text, exact=False).first
             try:
-                if await modal.is_visible(timeout=100):
+                if await modal.is_visible():
                     is_identity_dialog = True
                     break
             except Exception:
@@ -385,15 +387,30 @@ class StudioUploader:
         if self._on_progress:
             await self._on_progress("🔑 Google kimlik doğrulaması istedi. 'Sonraki' butonuna basılıyor...")
 
+        pages_before = len(page.context.pages)
         next_button = None
-        for btn_text in ["Sonraki", "Next"]:
-            btn = page.get_by_role("button", name=btn_text).first
-            try:
-                if await btn.is_visible(timeout=3000):
-                    next_button = btn
-                    break
-            except Exception:
-                continue
+        dialogs = page.locator("ytcp-dialog, tp-yt-paper-dialog, [role=dialog], [role=alertdialog]")
+        for verify_text in TEXTS["verify_identity"]:
+            scoped = dialogs.filter(has_text=verify_text)
+            for btn_text in ["Sonraki", "Next"]:
+                btn = scoped.get_by_role("button", name=btn_text).last
+                try:
+                    if await btn.is_visible():
+                        next_button = btn
+                        break
+                except Exception:
+                    continue
+            if next_button:
+                break
+        if not next_button:
+            for btn_text in ["Sonraki", "Next"]:
+                btn = page.get_by_role("button", name=btn_text).last
+                try:
+                    if await btn.is_visible():
+                        next_button = btn
+                        break
+                except Exception:
+                    continue
 
         if not next_button:
             next_button = page.locator("ytcp-button[id=confirm-button], paper-button[id=confirm-button]").first
@@ -407,12 +424,22 @@ class StudioUploader:
         # Onay seçenekleri ekranının yüklenmesi için bekle
         await asyncio.sleep(4)
 
+        # Google doğrulamayı yeni bir sekmede/pencerede açabiliyor; öyleyse oradan devam edilir.
+        origin = page
+        if len(page.context.pages) > pages_before:
+            page = page.context.pages[-1]
+            logger.info("Doğrulama yeni sekmede açıldı: %s", page.url.split("?")[0])
+            try:
+                await page.wait_for_load_state("domcontentloaded", timeout=15_000)
+            except Exception:  # noqa: BLE001
+                pass
+
         # 1. "Başka bir yöntem dene" (Try another way) linkini/butonunu bul ve tıkla
         try:
             try_another = None
             for text in ["Başka bir yöntem dene", "Try another way", "Try another way to sign in"]:
                 btn = page.get_by_text(text, exact=False).first
-                if await btn.is_visible(timeout=2000):
+                if await btn.is_visible():
                     try_another = btn
                     break
             
@@ -432,12 +459,12 @@ class StudioUploader:
             ]
             for opt_text in texts_to_check:
                 btn = page.get_by_text(opt_text, exact=False).first
-                if await btn.is_visible(timeout=1500):
+                if await btn.is_visible():
                     email_option = btn
                     break
             
             if not email_option:
-                items = page.locator("li, div[role=button]").all()
+                items = await page.locator("li, div[role=button]").all()
                 for item in items:
                     txt = await item.inner_text()
                     if "@" in txt or "kurtarma" in txt.lower() or "recovery" in txt.lower():
@@ -451,14 +478,31 @@ class StudioUploader:
         except Exception as exc:
             logger.warning("Kurtarma e-postası seçilemedi: %s", exc)
 
-        # 3. Ekran görüntüsü al ve kullanıcıya göndererek kodu bota yazmasını iste
+        # 3. Kod kutusu gerçekten açıldı mı? Açılmadıysa otomatik yol tıkanmıştır:
+        #    "kod gönderildi" demek yerine kullanıcı uzak ekrana yönlendirilir.
+        code_input = page.locator(_CODE_INPUT).first
+        try:
+            # Kod yalnızca Google'ın kendi doğrulama sayfasında girilir; hâlâ Studio'daysak
+            # ("Sonraki" tutmadı) oradaki başka bir metin kutusu kod kutusu sanılmamalı.
+            if "accounts.google.com" not in page.url:
+                raise PlaywrightTimeoutError("Google doğrulama sayfası açılmadı.")
+            await code_input.wait_for(state="visible", timeout=8_000)
+        except PlaywrightTimeoutError as exc:
+            raise StudioUploadError(
+                "kimlik doğrulama",
+                "Google 'Kimliğinizi doğrulayın' diyor ve bu adım otomatik geçilemedi. "
+                "/giris yazıp uzak ekranı açın; orada Oluştur → Video yükle deyip çıkan "
+                "doğrulamayı kendiniz tamamlayın, sonra 🔁 Tekrar dene'ye basın.",
+                await self._safe_screenshot(page),
+            ) from exc
+
         screenshot = await self._safe_screenshot(page)
         if screenshot and self._on_screenshot:
             await self._on_screenshot(
                 screenshot,
-                "📬 **Google kurtarma e-postanıza doğrulama kodu gönderdi!**\n\n"
-                "Lütfen kurtarma e-postanıza (Gmail) gelen **6 haneli doğrulama kodunu** "
-                "bota doğrudan mesaj olarak gönderin.\n"
+                "📬 <b>Google bir doğrulama kodu istiyor.</b>\n\n"
+                "Ekran görüntüsünde yazan yere (kurtarma e-postası / telefon) gelen "
+                "<b>doğrulama kodunu</b> bota doğrudan mesaj olarak gönderin.\n"
                 "Zaman aşımı süresi: 3 dakika."
             )
 
@@ -480,14 +524,13 @@ class StudioUploader:
 
         # 5. Kodu tarayıcıya gir
         try:
-            code_input = page.locator("input[type=tel], input[id=code], input[name=code], input[type=text]").first
             await code_input.fill(code)
             await _human_pause(0.5, 1.0)
             
             next_btn = None
             for txt in ["Sonraki", "Next"]:
                 btn = page.get_by_role("button", name=txt).first
-                if await btn.is_visible(timeout=2000):
+                if await btn.is_visible():
                     next_btn = btn
                     break
             if not next_btn:
@@ -501,6 +544,12 @@ class StudioUploader:
             return False
 
         # Son kontrol: YouTube Studio'ya geri yönlendirildik mi?
+        if origin is not page and not page.is_closed():
+            try:
+                await page.close()
+            except Exception:  # noqa: BLE001
+                pass
+        page = origin
         if "studio.youtube.com" in page.url and "accounts.google.com" not in page.url:
             logger.info("Doğrulama başarılı, devam ediliyor!")
             if self._on_progress:
