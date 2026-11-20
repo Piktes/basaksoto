@@ -149,13 +149,16 @@ def _filtered_folders(filter_: str, query: str) -> tuple[list[Any], list[str], d
 
 def _folder_label(folder: Any, channels: list[str], uploads: dict[str, list[str]],
                   checked: bool | None = None) -> str:
+    # Yükleme işaretleri adın ÖNÜNDE durur: Telegram uzun düğme metnini sondan "…" ile
+    # kırptığı için sonda olsalardı uzun klasör adlarında görünmezlerdi.
     uploaded = uploads.get(folder["folder_id"], [])
     marks = "".join("✅" if c in uploaded else "▫️" for c in channels)
     if checked is not None:
         icon = "☑️" if checked else "⬜"
     else:
-        icon = "⚠️" if folder["status"] == db.STATUS_ERROR else "📁"
-    return f"{icon} {folder['folder_name']}" + (f"  {marks}" if marks else "")
+        icon = "⚠️" if folder["status"] == db.STATUS_ERROR else ""
+    prefix = " ".join(part for part in (icon, marks) if part)
+    return f"{prefix} {folder['folder_name']}" if prefix else f"📁 {folder['folder_name']}"
 
 
 def _folder_list_view(data: dict[str, Any]) -> tuple[str, InlineKeyboardMarkup]:
