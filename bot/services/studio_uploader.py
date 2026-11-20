@@ -767,23 +767,32 @@ class StudioUploader:
         self._ucid = ucid
 
         ok, active = await self._open_channel(page, ucid, wanted)
+        trail = [f"ilk açılış: {active or 'ad okunamadı'}"]
         if not ok and active is None:
             # Etkin kimlik bu kanala erişemiyor: kimliği hedef kanala çevir, tarayıcıyı yeniden aç.
             logger.info("Etkin kimlik değiştiriliyor → %s", channel_name)
             if self._on_progress:
                 await self._on_progress("Kanal kimliği değiştiriliyor, tarayıcı yeniden açılıyor...")
-            if await self._select_identity(page, channel_name):
+            selected = await self._select_identity(page, channel_name)
+            trail.append(f"kanal seçicide tıklama: {'yapıldı' if selected else 'kanal listede yok'}"
+                         f" (sonraki adres: {page.url.split('?')[0][:70]})")
+            if selected:
                 context, page = await self._restart_browser(context)
                 ok, active = await self._open_channel(page, ucid, wanted)
+                trail.append(f"yeniden açılış: {active or 'ad okunamadı'}")
         if ok:
             logger.info("Kanal doğrulandı: %s (%s)", channel_name, ucid)
             await _human_pause()
             return context, page
 
+        logger.error("Kanal doğrulanamadı: %s (%s) — %s", channel_name, ucid, " | ".join(trail))
         raise StudioUploadError(
             "kanal doğrulama",
             f"Studio '{active or 'okunamadı'}' kanalını gösteriyor; beklenen '{channel_name}'. "
-            "Yükleme başlatılmadı. /kanallar → 'Kanalları otomatik bul' ile kanal kaydını yenileyin.",
+            "Yükleme başlatılmadı.\n"
+            f"Denenenler: {' → '.join(trail)}.\n"
+            "Elle çözüm: /giris ile uzak ekranı açın, YouTube'da sağ üstteki profil resmi → "
+            f"'Hesap değiştir' → '{channel_name}' seçin, sonra 'Giriş tamam'a basıp yeniden deneyin.",
             await self._safe_screenshot(page),
         )
 

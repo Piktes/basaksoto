@@ -8,6 +8,8 @@ from aiogram.types import Message
 
 router = Router(name="start")
 
+_LOG_TAIL_LINES = 400
+
 _HELP_TEXT = (
     "👋 <b>Drive → YouTube Yükleme Botu</b>\n\n"
     "Drive'daki şarkı klasörlerini tarar, onayınla videoya çevirir ve "
@@ -24,6 +26,7 @@ _HELP_TEXT = (
     "/temizle — yüklenmiş klasörleri Drive çöp kutusuna taşı\n"
     "/durdur — botu geçici olarak durdurur (yeni yüklemeleri engeller)\n"
     "/restart — botu aktif hale getirir ve yeniden başlatır\n"
+    "/log — sorun giderme için günlüğün son satırlarını gönder\n"
     "/yardim — bu mesaj"
 )
 
@@ -36,6 +39,24 @@ async def cmd_start(message: Message) -> None:
 @router.message(Command("yardim", "help"))
 async def cmd_help(message: Message) -> None:
     await message.answer(_HELP_TEXT)
+
+
+@router.message(Command("log"))
+async def cmd_log(message: Message) -> None:
+    """Sorun giderme: günlüğün son satırlarını dosya olarak gönderir."""
+    from aiogram.types import BufferedInputFile
+
+    from ..config import get_config
+
+    log_path = get_config().logs_dir / "bot.log"
+    if not log_path.exists():
+        await message.answer("Günlük dosyası henüz yok.")
+        return
+    lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-_LOG_TAIL_LINES:]
+    await message.answer_document(
+        BufferedInputFile("\n".join(lines).encode("utf-8"), filename="bot-log.txt"),
+        caption=f"🧾 Günlüğün son {len(lines)} satırı.",
+    )
 
 
 @router.message(Command("durdur"))
