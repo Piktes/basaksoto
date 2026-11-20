@@ -90,6 +90,8 @@ TEXTS: dict[str, list[str]] = {
     "create": ["Oluştur", "Create"],
     "checks_done": ["kontroller tamamlandı", "checks complete"],
     "verify_identity": ["Kimliğinizi doğrulayın", "Verify it's you", "Verify your identity"],
+    "no_permission": ["Bu sayfayı görüntüleme izniniz yok", "You don't have permission to view this page",
+                      "don't have permission to view"],
     "publish_anyway": ["Yine de yayınla", "Publish anyway"],
     "upload_done": ["yükleme tamamlandı", "upload complete", "işleniyor", "processing"],
     "uploading": ["yükleniyor", "uploading"],
@@ -164,6 +166,14 @@ def _launch_kwargs(cfg: Config) -> dict:
 
 def _is_login_url(url: str) -> bool:
     return "accounts.google.com" in url or "/signin" in url
+
+
+async def _close_quietly(context: BrowserContext) -> None:
+    """Tarayıcıyı kapatır; zaten kapalıysa (yeniden açma sırasında) sessizce geçer."""
+    try:
+        await context.close()
+    except Exception:  # noqa: BLE001
+        logger.debug("Tarayıcı zaten kapalıydı.")
 
 
 async def _read_switcher(page: Page) -> list[dict[str, str]]:
@@ -269,6 +279,7 @@ class StudioUploader:
             }
             if self._cfg.headless:
                 launch_kwargs["user_agent"] = HEADLESS_USER_AGENT
+            self._pw = pw
             context = await pw.chromium.launch_persistent_context(**launch_kwargs)
             page = context.pages[0] if context.pages else await context.new_page()
             page.set_default_timeout(60_000)
@@ -278,7 +289,8 @@ class StudioUploader:
                 await self._handle_identity_check(page)
 
                 step = "kanal değiştirme"
-                await self._ensure_channel(context, page, channel_name)
+                # Kimlik düzeltmesi gerekirse tarayıcı yeniden açılır: yeni context/page gelir.
+                context, page = await self._ensure_channel(context, page, channel_name)
                 await self._handle_identity_check(page)
 
                 if on_channel_confirm:
@@ -345,7 +357,7 @@ class StudioUploader:
                 logger.exception("Studio yüklemesi '%s' adımında başarısız.", step)
                 raise StudioUploadError(step, f"'{step}' adımında hata: {exc}", screenshot) from exc
             finally:
-                await context.close()
+                await _close_quietly(context)
 
     # ------------------------------------------------------------ adımlar
 
@@ -659,13 +671,86 @@ class StudioUploader:
                 return None
             await asyncio.sleep(0.5)
 
-    async def _ensure_channel(self, context: BrowserContext, page: Page, channel_name: str) -> None:
+    async def _no_permission_page(self, page: Page) -> bool:
+        """Studio 'Bu sayfayı görüntüleme izniniz yok' sayfasını mı gösteriyor?"""
+        for text in TEXTS["no_permission"]:
+            try:
+                if await page.get_by_text(text, exact=False).first.is_visible():
+                    return True
+            except Exception:  # noqa: BLE001
+                continue
+        return False
+
+    async def _open_channel(self, page: Page, ucid: str, wanted: str) -> tuple[bool, str | None]:
+        """Studio'yu kanal kimliğiyle açar; (doğrulandı mı, okunan kanal adı) döner."""
+        active: str | None = None
+        for _ in range(3):
+            await page.goto(_studio_channel_url(ucid), wait_until="domcontentloaded")
+            await self._dismiss_browser_warning(page)
+            await asyncio.sleep(1.0)
+            if f"/channel/{ucid}" not in page.url:
+                continue  # başka bir yönlendirme araya girdiyse yeniden dene
+            deadline = asyncio.get_running_loop().time() + 30
+            while asyncio.get_running_loop().time() < deadline:
+                active = await self._active_channel(page, timeout_ms=2_000)
+                if active is not None:
+                    break
+                if await self._no_permission_page(page):
+                    logger.info("Studio bu kimlikle kanala izin vermiyor: %s", ucid)
+                    return False, None
+            if _norm(active or "") == wanted:
+                return True, active
+        return False, active
+
+    async def _select_identity(self, page: Page, channel_name: str) -> bool:
+        """youtube.com/channel_switcher'da kanala tıklayıp etkin kimliği o kanal yapar.
+
+        Değişiklik Studio'ya ancak tarayıcı yeniden açılınca yansır; çağıran
+        tarafın ardından tarayıcıyı yeniden başlatması gerekir.
+        """
+        await _read_switcher(page)  # sayfayı açar ve kartların yüklenmesini bekler
+        items = page.locator(SELECTORS["switcher_item"])
+        wanted = _norm(channel_name)
+        for i in range(await items.count()):
+            item = items.nth(i)
+            raw = await item.locator(SELECTORS["switcher_item_name"]).first.inner_text()
+            if _norm(raw) != wanted:
+                continue
+            await item.click()
+            try:
+                await page.wait_for_url(lambda url: "channel_switcher" not in url, timeout=20_000)
+            except PlaywrightTimeoutError:
+                logger.warning("Kanal seçicide tıklama sonrası yönlendirme olmadı.")
+            await asyncio.sleep(5)  # kimlik çerezlerinin yazılması için
+            return True
+        return False
+
+    async def _restart_browser(self, context: BrowserContext) -> tuple[BrowserContext, Page]:
+        """Tarayıcıyı aynı profille kapatıp yeniden açar."""
+        try:
+            await context.close()
+        except Exception:  # noqa: BLE001
+            logger.warning("Tarayıcı kapatılırken hata (yok sayıldı).")
+        _clear_profile_locks(self._cfg)
+        context = await self._pw.chromium.launch_persistent_context(**_launch_kwargs(self._cfg))
+        page = context.pages[0] if context.pages else await context.new_page()
+        page.set_default_timeout(60_000)
+        return context, page
+
+    async def _ensure_channel(self, context: BrowserContext, page: Page,
+                              channel_name: str) -> tuple[BrowserContext, Page]:
         """Hedef kanalın Studio'sunu kanal kimliğiyle açar ve doğru kanalda olduğunu doğrular.
 
-        youtube.com/channel_switcher üzerinden kanal değiştirmek güvenilir değil:
-        tıklama kabul edilse de Studio aynı oturumda eski kanalı göstermeye devam
-        ediyor. Studio'yu ``/channel/<kimlik>`` adresiyle açmak ise kanalı anında
-        ve kesin olarak seçiyor. Kanal doğrulanamazsa yükleme BAŞLAMAZ.
+        youtube.com/channel_switcher üzerinden kanal değiştirmek tek başına güvenilir
+        değil: tıklama kabul edilse de Studio aynı oturumda eski kanalı göstermeye
+        devam ediyor. Studio'yu ``/channel/<kimlik>`` adresiyle açmak kanalı anında
+        seçiyor — yeter ki etkin kimlik o kanala erişebilsin. Erişemiyorsa (etkin
+        kimlik bir marka hesabıyken kişisel kanal istenirse Studio "izniniz yok"
+        der) kimlik kanal seçiciden hedef kanala çevrilir ve tarayıcı yeniden
+        açılır. Kanal doğrulanamazsa yükleme BAŞLAMAZ.
+
+        Returns:
+            Kullanılacak ``(context, page)`` — tarayıcı yeniden açıldıysa yenileri.
         """
         wanted = _norm(channel_name)
         # Studio kök adresten /channel/<kimlik>'e kendi yönlendirmesini bitirsin;
@@ -681,18 +766,19 @@ class StudioUploader:
             db.set_channel_ucid(channel_name, ucid)
         self._ucid = ucid
 
-        active: str | None = None
-        for _ in range(3):
-            await page.goto(_studio_channel_url(ucid), wait_until="domcontentloaded")
-            await self._dismiss_browser_warning(page)
-            await asyncio.sleep(1.0)
-            if f"/channel/{ucid}" not in page.url:
-                continue  # başka bir yönlendirme araya girdiyse yeniden dene
-            active = await self._active_channel(page)
-            if _norm(active or "") == wanted:
-                logger.info("Kanal doğrulandı: %s (%s)", channel_name, ucid)
-                await _human_pause()
-                return
+        ok, active = await self._open_channel(page, ucid, wanted)
+        if not ok and active is None:
+            # Etkin kimlik bu kanala erişemiyor: kimliği hedef kanala çevir, tarayıcıyı yeniden aç.
+            logger.info("Etkin kimlik değiştiriliyor → %s", channel_name)
+            if self._on_progress:
+                await self._on_progress("Kanal kimliği değiştiriliyor, tarayıcı yeniden açılıyor...")
+            if await self._select_identity(page, channel_name):
+                context, page = await self._restart_browser(context)
+                ok, active = await self._open_channel(page, ucid, wanted)
+        if ok:
+            logger.info("Kanal doğrulandı: %s (%s)", channel_name, ucid)
+            await _human_pause()
+            return context, page
 
         raise StudioUploadError(
             "kanal doğrulama",
@@ -773,28 +859,38 @@ class StudioUploader:
         """
         _clear_profile_locks(self._cfg)
         async with async_playwright() as pw:
+            self._pw = pw
             context = await pw.chromium.launch_persistent_context(**_launch_kwargs(self._cfg))
             page = context.pages[0] if context.pages else await context.new_page()
             page.set_default_timeout(60_000)
             try:
-                found: list[dict[str, str]] = []
+                pending: list[dict[str, str]] = []
                 for entry in await _read_switcher(page):
-                    if not entry["handle"]:
-                        continue
-                    ucid = await _resolve_handle(page, entry["handle"])
-                    if not ucid:
-                        continue
-                    await page.goto(_studio_channel_url(ucid), wait_until="domcontentloaded")
-                    await self._dismiss_browser_warning(page)
-                    active = await self._active_channel(page)
-                    if _norm(active or "") == _norm(entry["name"]):
-                        found.append({"name": entry["name"], "ucid": ucid})
-                    else:
-                        logger.warning("Kanal doğrulanamadı: %r → Studio %r gösterdi.",
-                                       entry["name"], active)
+                    ucid = await _resolve_handle(page, entry["handle"]) if entry["handle"] else None
+                    if ucid:
+                        pending.append({"name": entry["name"], "ucid": ucid})
+
+                found: list[dict[str, str]] = []
+                for attempt in range(2):
+                    failed: list[dict[str, str]] = []
+                    for channel in pending:
+                        ok, active = await self._open_channel(page, channel["ucid"], _norm(channel["name"]))
+                        if ok:
+                            found.append(channel)
+                        else:
+                            failed.append(channel)
+                            logger.warning("Kanal doğrulanamadı: %r → Studio %r gösterdi.",
+                                           channel["name"], active)
+                    if not failed or attempt == 1:
+                        break
+                    # Etkin kimlik bu kanal(lar)a erişemiyor olabilir: kimliği çevirip yeniden dene.
+                    if not await self._select_identity(page, failed[0]["name"]):
+                        break
+                    context, page = await self._restart_browser(context)
+                    pending = failed
                 return found
             finally:
-                await context.close()
+                await _close_quietly(context)
 
     async def _open_upload_dialog(self, page: Page) -> None:
         """Oluştur → Video yükle (buton rol+isimle, menü metni TR/EN denenir)."""
